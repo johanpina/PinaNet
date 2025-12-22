@@ -140,20 +140,19 @@ def predict(
     level = level.lower()
     model_dir = f"./models/{level}/"
     
-    
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
 
     print(f"Using device: {device} ⚙️")
 
-    # --- LÓGICA DE CARGA DIFERENCIADA ---
+    # --- LÓGICA DE CARGA ---
     try:
         begin = time.time()
         # 1. Cargar Tokenizador
         tokenizer = AutoTokenizer.from_pretrained("zhihan1996/DNABERT-2-117M", trust_remote_code=True)
         print(f"LOG: Tokenizador cargado, tiempo: {(time.time() - begin):.2f} segundos.")
         
-        # 2. Leer Etiquetas del config.json manualmente (para evitar el error de model_type)
+        # 2. Configuración y Etiquetas
         begin = time.time()
         with open(os.path.join(model_dir, "config.json"), "r") as f:
             config_data = json.load(f)
@@ -163,77 +162,123 @@ def predict(
         num_labels = len(id2label)
         print(f"LOG: Etiquetas cargadas, tiempo: {(time.time() - begin):.2f} segundos.")
 
+        # 3. Carga del Modelo
         if level in ["binary", "superfamilies", "binario", "superfamilia", "order", "orden"]:
             typer.echo(f"🧠 Cargando Modelo Híbrido: {level}...")
-            # Re-instanciamos como en tu notebook
             SAFE_CHECKPOINT = "quietflamingo/dnabert2-no-flashattention"
             begin = time.time()
             model = DNABERT_BiLSTM_NER(SAFE_CHECKPOINT, num_labels, id2label, label2id)
-            # Cargar pesos manualmente
             weights_path = os.path.join(model_dir, "pytorch_model.bin")
             model.load_state_dict(torch.load(weights_path, map_location=device), strict=False)
             print(f"LOG: Modelo cargado, tiempo: {(time.time() - begin):.2f} segundos.")
         else:
             typer.echo(f"🧬 Cargando Modelo Estándar: {level}...")
-            # Para el estándar sí podemos usar AutoModel porque no tiene model_type custom
             model = AutoModelForTokenClassification.from_pretrained(model_dir, trust_remote_code=True)
+        
         begin = time.time()
+
+        # 4. Configuración Multi-GPU (DataParallel)
+        if torch.cuda.device_count() > 1 and device == "cuda":
+            print(f"⚡ ¡Multi-GPU Detectado! Usando {torch.cuda.device_count()} GPUs en paralelo.")
+            model = nn.DataParallel(model)
+
         model.to(device).eval()    
         print(f"LOG: Modelo listo, tiempo: {(time.time() - begin):.2f} segundos.")
+
     except Exception as e:
         typer.echo(f"❌ Error al cargar el modelo: {e}")
         raise typer.Exit(1)
+
     begin1 = time.time()
+    
     # --- PIPELINE DE INFERENCIA ---
     dataset = GenomeChunkDataset(fasta_path=fasta_file, tokenizer=tokenizer)
     print(f"LOG: Dataset cargado, tiempo: {(time.time() - begin1):.2f} segundos.")
     begin = time.time()
-    dataloader = DataLoader(dataset, batch_size=1, num_workers=num_workers)
+
+    # Ajuste de Batch Size para Multi-GPU
+    n_gpus = torch.cuda.device_count()
+    real_batch_size = n_gpus if (device == "cuda" and n_gpus > 1) else 1
+    
+    print(f"LOG: Usando Batch Size efectivo: {real_batch_size} chunks (Total ventanas simultáneas: ~{real_batch_size*120}).")
+
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=real_batch_size, 
+        num_workers=num_workers,    
+        pin_memory=True
+    )
     
     print(f"LOG: Dataloader listo, tiempo: {(time.time() - begin):.2f} segundos.")
-    begin = time.time()
+    
     raw_predictions = []
-    with torch.no_grad():
+    
+    # Usamos inference_mode para un poco más de velocidad que no_grad
+    with torch.inference_mode():
         for batch in tqdm(dataloader, desc="Anotando"):
             begin = time.time()
-            input_ids = batch['input_ids'][0].to(device)
-            attention_mask = batch['attention_mask'][0].to(device)
-            offset_mapping = batch['offset_mapping'][0]
-            global_start = batch['global_start'].item()
-            seq_id = batch['seq_id'][0]
-
-            outputs = model(input_ids, attention_mask=attention_mask)
-            logits = outputs.logits if hasattr(outputs, "logits") else outputs
-            preds = torch.argmax(logits, dim=2).cpu().numpy()
-            print(f"LOG: Batch inferido, tiempo: {(time.time() - begin):.2f} segundos.")
-            begin = time.time()
-            for i, window_preds in enumerate(preds):
-                offsets = offset_mapping[i]
-                for token_idx, label_id in enumerate(window_preds):
-                    label = id2label[label_id]
-                    if label in ["Background", "O"]: continue
-                    
-                    start_l, end_l = offsets[token_idx]
-                    if start_l == end_l: continue
-
-                    raw_predictions.append({
-                        "seq_id": seq_id,
-                        "start": global_start + start_l.item(),
-                        "end": global_start + end_l.item(),
-                        "label": label
-                    })
-            print(f"LOG: Batch procesado, tiempo: {(time.time() - begin):.2f} segundos.")
             
-    print(f"LOG: Inferencia finalizada, tiempo: {(time.time() - begin):.2f} segundos.")
+            # non_blocking=True permite transferencia asíncrona mientras GPU calcula
+            input_ids = batch['input_ids'].to(device, non_blocking=True) # [B, N, L]
+            attention_mask = batch['attention_mask'].to(device, non_blocking=True)
+
+            # Aplanamos para DataParallel: [B*N, 512]
+            B, N, L = input_ids.shape
+            input_ids_flat = input_ids.view(-1, L)
+            mask_flat = attention_mask.view(-1, L)
+            
+            # Inferencia Multi-GPU
+            outputs = model(input_ids_flat, attention_mask=mask_flat)
+            logits = outputs.logits if hasattr(outputs, "logits") else outputs
+
+            # Recuperamos estructura [B, N, Num_Clases]
+            logits = logits.view(B, N, -1)
+            preds = torch.argmax(logits, dim=2).cpu().numpy() 
+
+            # print(f"LOG: Batch inferido ({B} chunks), tiempo: {(time.time() - begin):.2f} segundos.")
+            
+            # --- RECONSTRUCCIÓN (CORREGIDA) ---
+            begin_proc = time.time()
+            for b in range(B): 
+                # Extraemos datos de este Chunk específico
+                chunk_preds_ids = preds[b]                 # [N, 512] (IDs predichos)
+                chunk_offsets = batch['offset_mapping'][b] # [N, 512, 2] (Coordenadas)
+                global_start = batch['global_start'][b].item()
+                seq_id = batch['seq_id'][b]
+
+                # Iteramos sobre las ventanas del chunk (N)
+                for win_idx, window_pred_ids in enumerate(chunk_preds_ids):
+                    window_offsets = chunk_offsets[win_idx] # (512, 2)
+                    
+                    # Iteramos sobre los tokens de la ventana (L=512)
+                    for token_idx, label_id in enumerate(window_pred_ids):
+                        # Aquí sí tenemos el ID correcto
+                        label = id2label[label_id]
+                        
+                        if label in ["Background", "O"]: continue
+                        
+                        start_l, end_l = window_offsets[token_idx]
+                        if start_l == end_l: continue # Tokens especiales
+
+                        raw_predictions.append({
+                            "seq_id": seq_id,
+                            "start": global_start + start_l.item(),
+                            "end": global_start + end_l.item(),
+                            "label": label
+                        })
+            # print(f"LOG: Procesamiento CPU completado: {(time.time() - begin_proc):.2f} s")
+            
+    print(f"LOG: Inferencia finalizada.")
     begin = time.time()
+    
     # --- POST-PROCESAMIENTO ---
     clean_annotations = merge_annotations(raw_predictions)
-    print(f"LOG: Post-procesamiento finalizado, tiempo: {(time.time() - begin):.2f} segundos.")
-    begin = time.time()
+    print(f"LOG: Fusión completada, tiempo: {(time.time() - begin):.2f} segundos.")
+    
     write_gff3(clean_annotations, output_gff)
-    print(f"LOG: GFF3 guardado, tiempo: {(time.time() - begin):.2f} segundos.")
+    
     end = time.time()
-    print(f"Tiempo del pipeline: {(end - begin1):.2f}  segundos.")
+    print(f"⏱️ Tiempo TOTAL del pipeline: {(end - begin1):.2f} segundos.")
     typer.secho(f"✅ ¡Finalizado! Resultados en {output_gff}", fg=typer.colors.GREEN, bold=True)
 
 if __name__ == "__main__":
