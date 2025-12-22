@@ -67,6 +67,7 @@ class GenomeChunkDataset(Dataset):
         self.chunks_metadata = []
         
         print(f"📖 Indexando secuencia FASTA: {fasta_path}...")
+        begin = time.time()
         for record in SeqIO.parse(fasta_path, "fasta"):
             seq_len = len(record.seq)
             for start in range(0, seq_len, chunk_size):
@@ -76,6 +77,7 @@ class GenomeChunkDataset(Dataset):
                     "seq_str": str(record.seq[start:end]).upper(),
                     "global_start": start
                 })
+        print(f"LOG: Secuencia indexada, tiempo: {(time.time() - begin):.2f} segundos.")
         print(f"✅ {len(self.chunks_metadata)} fragmentos generados.")
 
     def __len__(self):
@@ -142,45 +144,58 @@ def predict(
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
 
+    print(f"Using device: {device} ⚙️")
+
     # --- LÓGICA DE CARGA DIFERENCIADA ---
     try:
+        begin = time.time()
         # 1. Cargar Tokenizador
         tokenizer = AutoTokenizer.from_pretrained("zhihan1996/DNABERT-2-117M", trust_remote_code=True)
+        print(f"LOG: Tokenizador cargado, tiempo: {(time.time() - begin):.2f} segundos.")
         
         # 2. Leer Etiquetas del config.json manualmente (para evitar el error de model_type)
+        begin = time.time()
         with open(os.path.join(model_dir, "config.json"), "r") as f:
             config_data = json.load(f)
         
         id2label = {int(k): v for k, v in config_data["id2label"].items()}
         label2id = config_data["label2id"]
         num_labels = len(id2label)
+        print(f"LOG: Etiquetas cargadas, tiempo: {(time.time() - begin):.2f} segundos.")
 
         if level in ["binary", "superfamilies", "binario", "superfamilia", "order", "orden"]:
             typer.echo(f"🧠 Cargando Modelo Híbrido: {level}...")
             # Re-instanciamos como en tu notebook
             SAFE_CHECKPOINT = "quietflamingo/dnabert2-no-flashattention"
+            begin = time.time()
             model = DNABERT_BiLSTM_NER(SAFE_CHECKPOINT, num_labels, id2label, label2id)
-            
             # Cargar pesos manualmente
             weights_path = os.path.join(model_dir, "pytorch_model.bin")
             model.load_state_dict(torch.load(weights_path, map_location=device), strict=False)
+            print(f"LOG: Modelo cargado, tiempo: {(time.time() - begin):.2f} segundos.")
         else:
             typer.echo(f"🧬 Cargando Modelo Estándar: {level}...")
             # Para el estándar sí podemos usar AutoModel porque no tiene model_type custom
             model = AutoModelForTokenClassification.from_pretrained(model_dir, trust_remote_code=True)
-        
+        begin = time.time()
         model.to(device).eval()    
+        print(f"LOG: Modelo listo, tiempo: {(time.time() - begin):.2f} segundos.")
     except Exception as e:
         typer.echo(f"❌ Error al cargar el modelo: {e}")
         raise typer.Exit(1)
-    begin = time.time()
+    begin1 = time.time()
     # --- PIPELINE DE INFERENCIA ---
     dataset = GenomeChunkDataset(fasta_path=fasta_file, tokenizer=tokenizer)
+    print(f"LOG: Dataset cargado, tiempo: {(time.time() - begin1):.2f} segundos.")
+    begin = time.time()
     dataloader = DataLoader(dataset, batch_size=1, num_workers=num_workers)
-
+    
+    print(f"LOG: Dataloader listo, tiempo: {(time.time() - begin):.2f} segundos.")
+    begin = time.time()
     raw_predictions = []
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Anotando"):
+            begin = time.time()
             input_ids = batch['input_ids'][0].to(device)
             attention_mask = batch['attention_mask'][0].to(device)
             offset_mapping = batch['offset_mapping'][0]
@@ -190,7 +205,8 @@ def predict(
             outputs = model(input_ids, attention_mask=attention_mask)
             logits = outputs.logits if hasattr(outputs, "logits") else outputs
             preds = torch.argmax(logits, dim=2).cpu().numpy()
-
+            print(f"LOG: Batch inferido, tiempo: {(time.time() - begin):.2f} segundos.")
+            begin = time.time()
             for i, window_preds in enumerate(preds):
                 offsets = offset_mapping[i]
                 for token_idx, label_id in enumerate(window_preds):
@@ -206,11 +222,18 @@ def predict(
                         "end": global_start + end_l.item(),
                         "label": label
                     })
-
+            print(f"LOG: Batch procesado, tiempo: {(time.time() - begin):.2f} segundos.")
+            
+    print(f"LOG: Inferencia finalizada, tiempo: {(time.time() - begin):.2f} segundos.")
+    begin = time.time()
+    # --- POST-PROCESAMIENTO ---
     clean_annotations = merge_annotations(raw_predictions)
+    print(f"LOG: Post-procesamiento finalizado, tiempo: {(time.time() - begin):.2f} segundos.")
+    begin = time.time()
     write_gff3(clean_annotations, output_gff)
+    print(f"LOG: GFF3 guardado, tiempo: {(time.time() - begin):.2f} segundos.")
     end = time.time()
-    print(f"Tiempo del pipeline: {(end - begin):.2f}  segundos.")
+    print(f"Tiempo del pipeline: {(end - begin1):.2f}  segundos.")
     typer.secho(f"✅ ¡Finalizado! Resultados en {output_gff}", fg=typer.colors.GREEN, bold=True)
 
 if __name__ == "__main__":
