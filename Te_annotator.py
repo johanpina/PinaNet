@@ -148,11 +148,9 @@ def predict(
     # --- LÓGICA DE CARGA ---
     try:
         begin = time.time()
-        # 1. Cargar Tokenizador
         tokenizer = AutoTokenizer.from_pretrained("zhihan1996/DNABERT-2-117M", trust_remote_code=True)
         print(f"LOG: Tokenizador cargado, tiempo: {(time.time() - begin):.2f} segundos.")
         
-        # 2. Configuración y Etiquetas
         begin = time.time()
         with open(os.path.join(model_dir, "config.json"), "r") as f:
             config_data = json.load(f)
@@ -162,7 +160,6 @@ def predict(
         num_labels = len(id2label)
         print(f"LOG: Etiquetas cargadas, tiempo: {(time.time() - begin):.2f} segundos.")
 
-        # 3. Carga del Modelo
         if level in ["binary", "superfamilies", "binario", "superfamilia", "order", "orden"]:
             typer.echo(f"🧠 Cargando Modelo Híbrido: {level}...")
             SAFE_CHECKPOINT = "quietflamingo/dnabert2-no-flashattention"
@@ -177,7 +174,6 @@ def predict(
         
         begin = time.time()
 
-        # 4. Configuración Multi-GPU (DataParallel)
         if torch.cuda.device_count() > 1 and device == "cuda":
             print(f"⚡ ¡Multi-GPU Detectado! Usando {torch.cuda.device_count()} GPUs en paralelo.")
             model = nn.DataParallel(model)
@@ -196,6 +192,7 @@ def predict(
     print(f"LOG: Dataset cargado, tiempo: {(time.time() - begin1):.2f} segundos.")
     begin = time.time()
 
+    # Batch Size = 1 es lo más seguro. DataParallel paraleliza las ventanas internas.
     dataloader = DataLoader(
         dataset, 
         batch_size=1, 
@@ -207,52 +204,52 @@ def predict(
     
     raw_predictions = []
     
-    # Usamos inference_mode para un poco más de velocidad que no_grad
+    # Usamos no_grad para evitar el error de LSTM inplace
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Anotando"):
-            begin = time.time()
             
-            # non_blocking=True permite transferencia asíncrona mientras GPU calcula
-            input_ids = batch['input_ids'].to(device, non_blocking=True) # [B, N, L]
-            attention_mask = batch['attention_mask'].to(device, non_blocking=True)
+            # input_ids shape: [1, Num_Ventanas, 512]
+            input_ids = batch['input_ids'][0].to(device, non_blocking=True)
+            attention_mask = batch['attention_mask'][0].to(device, non_blocking=True)
 
-            # Aplanamos para DataParallel: [B*N, 512]
+            # Aplanamos para DataParallel: [Total_Ventanas, 512]
             B, N, L = input_ids.shape
             input_ids_flat = input_ids.view(-1, L)
             mask_flat = attention_mask.view(-1, L)
             
             # Inferencia Multi-GPU
+            # Output shape: [Total_Ventanas, 512, Num_Labels]
             outputs = model(input_ids_flat, attention_mask=mask_flat)
             logits = outputs.logits if hasattr(outputs, "logits") else outputs
 
-            # Recuperamos estructura [B, N, Num_Clases]
-            logits = logits.view(B, N, -1)
-            preds = torch.argmax(logits, dim=2).cpu().numpy() 
-
-            # print(f"LOG: Batch inferido ({B} chunks), tiempo: {(time.time() - begin):.2f} segundos.")
+            # --- CORRECCIÓN CRÍTICA DE DIMENSIONES ---
+            # 1. Recuperamos la forma [B, N, 512, Num_Labels]
+            #    Antes faltaba el 512, por eso colapsaba todo.
+            logits = logits.view(B, N, L, -1) 
             
-            # --- RECONSTRUCCIÓN (CORREGIDA) ---
-            begin_proc = time.time()
+            # 2. Argmax sobre la dimensión de las etiquetas (dimensión 3)
+            #    Resultado shape: [B, N, 512]
+            preds = torch.argmax(logits, dim=3).cpu().numpy() 
+
+            # --- RECONSTRUCCIÓN ---
             for b in range(B): 
-                # Extraemos datos de este Chunk específico
-                chunk_preds_ids = preds[b]                 # [N, 512] (IDs predichos)
-                chunk_offsets = batch['offset_mapping'][b] # [N, 512, 2] (Coordenadas)
+                chunk_preds_ids = preds[b]                 # Shape: [N, 512]
+                chunk_offsets = batch['offset_mapping'][b] # Shape: [N, 512, 2]
                 global_start = batch['global_start'][b].item()
                 seq_id = batch['seq_id'][b]
 
-                # Iteramos sobre las ventanas del chunk (N)
+                # Iteramos sobre cada ventana (N)
                 for win_idx, window_pred_ids in enumerate(chunk_preds_ids):
-                    window_offsets = chunk_offsets[win_idx] # (512, 2)
+                    # window_pred_ids es ahora un array de 512 enteros. ¡Correcto!
+                    window_offsets = chunk_offsets[win_idx] 
                     
-                    # Iteramos sobre los tokens de la ventana (L=512)
+                    # Iteramos sobre los 512 tokens
                     for token_idx, label_id in enumerate(window_pred_ids):
-                        # Aquí sí tenemos el ID correcto
                         label = id2label[label_id]
-                        
                         if label in ["Background", "O"]: continue
                         
                         start_l, end_l = window_offsets[token_idx]
-                        if start_l == end_l: continue # Tokens especiales
+                        if start_l == end_l: continue 
 
                         raw_predictions.append({
                             "seq_id": seq_id,
@@ -260,7 +257,6 @@ def predict(
                             "end": global_start + end_l.item(),
                             "label": label
                         })
-            # print(f"LOG: Procesamiento CPU completado: {(time.time() - begin_proc):.2f} s")
             
     print(f"LOG: Inferencia finalizada.")
     begin = time.time()
@@ -274,6 +270,6 @@ def predict(
     end = time.time()
     print(f"⏱️ Tiempo TOTAL del pipeline: {(end - begin1):.2f} segundos.")
     typer.secho(f"✅ ¡Finalizado! Resultados en {output_gff}", fg=typer.colors.GREEN, bold=True)
-
+    
 if __name__ == "__main__":
     app()
