@@ -196,15 +196,9 @@ def predict(
     print(f"LOG: Dataset cargado, tiempo: {(time.time() - begin1):.2f} segundos.")
     begin = time.time()
 
-    # Ajuste de Batch Size para Multi-GPU
-    n_gpus = torch.cuda.device_count()
-    real_batch_size = n_gpus if (device == "cuda" and n_gpus > 1) else 1
-    
-    print(f"LOG: Usando Batch Size efectivo: {real_batch_size} chunks (Total ventanas simultáneas: ~{real_batch_size*120}).")
-
     dataloader = DataLoader(
         dataset, 
-        batch_size=real_batch_size, 
+        batch_size=1, 
         num_workers=num_workers,    
         pin_memory=True
     )
