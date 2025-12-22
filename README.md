@@ -56,7 +56,7 @@ pip install -r requirements.txt
 
 ## 📂 Configuración de Modelos
 
-Debido al gran tamaño de los pesos neuronales, los modelos entrenados **no se incluyen** en el control de versiones de Git. Debes copiar tus carpetas de modelos entrenados manualmente en la estructura del proyecto.
+Debido al gran tamaño de los pesos neuronales, los modelos entrenados **no se incluyen** en el control de versiones de Git. Debes copiar tus carpetas directamente de los archivos del servidor o solicitarlos al owner del proyecto.
 
 La estructura de carpetas debe verse **exactamente** así para que el software los reconozca:
 
@@ -88,7 +88,7 @@ PinaNet_CLI/
 El programa se ejecuta desde la línea de comandos (CLI). La sintaxis básica es:
 
 ```bash
-python Te_annotator.py predict [ARGUMENTOS] [OPCIONES]
+python Te_annotator.py [ARGUMENTOS] [OPCIONES]
 ```
 
 ### Argumentos Principales
@@ -114,8 +114,8 @@ python Te_annotator.py predict [ARGUMENTOS] [OPCIONES]
 Escanea el genoma y marca regiones que contienen elementos transponibles sin clasificarlos. Útil para enmascaramiento rápido o detección de densidad.
 
 ```bash
-python Te_annotator.py predict \
-    ./data/genoma_maiz.fasta \
+python Te_annotator.py \
+    ./test/genoma_maiz.fasta \
     ./resultados/deteccion_binaria.gff3 \
     --level binary \
     --num-workers 8 \
@@ -126,19 +126,19 @@ python Te_annotator.py predict \
 Clasifica los elementos encontrados en grandes grupos taxonómicos (LTR, LINE, TIR, etc.).
 
 ```bash
-python Te_annotator.py predict \
-    ./data/genoma_arroz.fasta \
+python Te_annotator.py \
+    ./test/genoma_arroz.fasta \
     ./resultados/clasificacion_ordenes.gff3 \
     --level order \
     --device cuda
 ```
 
 ### 3. Clasificación Fina (Superfamilias)
-El análisis más detallado. Clasifica en familias específicas (Gypsy, Copia, Mutator, CACTA, etc.).
+El análisis más detallado. Clasifica en familias específicas (Gypsy, Copia, etc.).
 
 ```bash
-python Te_annotator.py predict \
-    ./data/genoma_desconocido.fasta \
+python Te_annotator.py \
+    ./test/genoma_desconocido.fasta \
     ./resultados/full_annotation.gff3 \
     --level superfamilies \
     --num-workers 4
