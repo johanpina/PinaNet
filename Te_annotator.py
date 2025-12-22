@@ -155,7 +155,7 @@ def predict(
         label2id = config_data["label2id"]
         num_labels = len(id2label)
 
-        if level in ["binary", "superfamilies", "binario", "superfamilia"]:
+        if level in ["binary", "superfamilies", "binario", "superfamilia", "order", "orden"]:
             typer.echo(f"🧠 Cargando Modelo Híbrido: {level}...")
             # Re-instanciamos como en tu notebook
             SAFE_CHECKPOINT = "quietflamingo/dnabert2-no-flashattention"
