@@ -153,7 +153,7 @@ def predict(
         
         id2label = {int(k): v for k, v in config_data["id2label"].items()}
         label2id = config_data["label2id"]
-        num_labels = config_data["num_labels"]
+        num_labels = len(id2label)
 
         if level in ["binary", "superfamilies", "binario", "superfamilia"]:
             typer.echo(f"🧠 Cargando Modelo Híbrido: {level}...")
