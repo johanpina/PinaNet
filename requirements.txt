@@ -1,0 +1,6 @@
+typer
+biopython
+pandas
+torch
+transformers
+einops

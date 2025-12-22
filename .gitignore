@@ -1,0 +1,25 @@
+# --- 1. Entorno Virtual y Python ---
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# --- 2. Archivos de Modelos Pesados (Global) ---
+# Ignora estos archivos donde sea que estén
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.h5
+
+# --- 3. Configuración específica para la carpeta 'models' ---
+# Ignoramos todos los JSON y configs dentro de models
+# (ya que dijiste que copiarás todo manualmente)
+models/**/*.json
+models/**/*.txt
+
+# --- 4. EXCEPCIÓN CRÍTICA (El truco) ---
+# Ignora todo en models, PERO...
+# ¡No ignores los archivos .gitkeep!
+# Esto obliga a Git a subir la estructura de carpetas vacías.
+!models/**/.gitkeep
