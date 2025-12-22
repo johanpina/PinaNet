@@ -180,7 +180,6 @@ def predict(
 
         model.to(device).eval()    
         print(f"LOG: Modelo listo, tiempo: {(time.time() - begin):.2f} segundos.")
-
     except Exception as e:
         typer.echo(f"❌ Error al cargar el modelo: {e}")
         raise typer.Exit(1)
@@ -192,71 +191,73 @@ def predict(
     print(f"LOG: Dataset cargado, tiempo: {(time.time() - begin1):.2f} segundos.")
     begin = time.time()
 
-    # Batch Size = 1 es lo más seguro. DataParallel paraleliza las ventanas internas.
+    # Batch Size = 1.
     dataloader = DataLoader(
         dataset, 
         batch_size=1, 
         num_workers=num_workers,    
-        pin_memory=True
+        pin_memory=True if device == "cuda" else False
     )
     
     print(f"LOG: Dataloader listo, tiempo: {(time.time() - begin):.2f} segundos.")
     
     raw_predictions = []
     
-    # Usamos no_grad para evitar el error de LSTM inplace
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Anotando"):
             
-            # input_ids shape: [1, Num_Ventanas, 512]
-            input_ids = batch['input_ids'][0].to(device, non_blocking=True)
-            attention_mask = batch['attention_mask'][0].to(device, non_blocking=True)
-
-            # Aplanamos para DataParallel: [Total_Ventanas, 512]
-            B, N, L = input_ids.shape
-            input_ids_flat = input_ids.view(-1, L)
-            mask_flat = attention_mask.view(-1, L)
+            # --- 1. MANEJO INTELIGENTE DE DIMENSIONES ---
+            # El DataLoader devuelve [Batch=1, Num_Windows, Seq_Len=512]
+            # Queremos eliminar SOLO la dimensión del Batch=1 para que quede [Num_Windows, 512]
+            # y que DataParallel pueda repartir esas ventanas.
             
-            # Inferencia Multi-GPU
-            # Output shape: [Total_Ventanas, 512, Num_Labels]
-            outputs = model(input_ids_flat, attention_mask=mask_flat)
+            input_ids = batch['input_ids']
+            attention_mask = batch['attention_mask']
+            
+            # Si tiene 3 dimensiones [1, N, 512], quitamos la primera.
+            if input_ids.dim() == 3:
+                input_ids = input_ids.squeeze(0)          # [N, 512]
+                attention_mask = attention_mask.squeeze(0) # [N, 512]
+            
+            # Ahora movemos a GPU
+            input_ids = input_ids.to(device, non_blocking=True)
+            attention_mask = attention_mask.to(device, non_blocking=True)
+            
+            # --- 2. INFERENCIA ---
+            # input_ids ahora es [N, 512]. 
+            # DataParallel dividirá N entre las GPUs (ej: 120 ventanas / 8 GPUs = 15 ventanas/GPU)
+            outputs = model(input_ids, attention_mask=attention_mask)
             logits = outputs.logits if hasattr(outputs, "logits") else outputs
-
-            # --- CORRECCIÓN CRÍTICA DE DIMENSIONES ---
-            # 1. Recuperamos la forma [B, N, 512, Num_Labels]
-            #    Antes faltaba el 512, por eso colapsaba todo.
-            logits = logits.view(B, N, L, -1) 
             
-            # 2. Argmax sobre la dimensión de las etiquetas (dimensión 3)
-            #    Resultado shape: [B, N, 512]
-            preds = torch.argmax(logits, dim=3).cpu().numpy() 
+            # logits shape: [N, 512, Num_Labels]
+            # Hacemos argmax sobre la última dimensión (etiquetas)
+            preds = torch.argmax(logits, dim=2).cpu().numpy() # [N, 512]
 
-            # --- RECONSTRUCCIÓN ---
-            for b in range(B): 
-                chunk_preds_ids = preds[b]                 # Shape: [N, 512]
-                chunk_offsets = batch['offset_mapping'][b] # Shape: [N, 512, 2]
-                global_start = batch['global_start'][b].item()
-                seq_id = batch['seq_id'][b]
+            # --- 3. RECONSTRUCCIÓN ---
+            # Recuperamos metadatos del batch (están en CPU)
+            # Como batch_size=1, tomamos el elemento 0 de la lista
+            offset_mapping = batch['offset_mapping'][0] 
+            global_start = batch['global_start'].item()
+            seq_id = batch['seq_id'][0]
 
-                # Iteramos sobre cada ventana (N)
-                for win_idx, window_pred_ids in enumerate(chunk_preds_ids):
-                    # window_pred_ids es ahora un array de 512 enteros. ¡Correcto!
-                    window_offsets = chunk_offsets[win_idx] 
+            # Iteramos sobre las ventanas (N)
+            # preds es [N, 512]
+            for win_idx, window_pred_ids in enumerate(preds):
+                window_offsets = offset_mapping[win_idx] # (512, 2)
+                
+                for token_idx, label_id in enumerate(window_pred_ids):
+                    label = id2label[label_id]
+                    if label in ["Background", "O"]: continue
                     
-                    # Iteramos sobre los 512 tokens
-                    for token_idx, label_id in enumerate(window_pred_ids):
-                        label = id2label[label_id]
-                        if label in ["Background", "O"]: continue
-                        
-                        start_l, end_l = window_offsets[token_idx]
-                        if start_l == end_l: continue 
+                    start_l, end_l = window_offsets[token_idx]
+                    if start_l == end_l: continue
 
-                        raw_predictions.append({
-                            "seq_id": seq_id,
-                            "start": global_start + start_l.item(),
-                            "end": global_start + end_l.item(),
-                            "label": label
-                        })
+                    raw_predictions.append({
+                        "seq_id": seq_id,
+                        "start": global_start + start_l.item(),
+                        "end": global_start + end_l.item(),
+                        "label": label
+                    })
             
     print(f"LOG: Inferencia finalizada.")
     begin = time.time()
@@ -270,6 +271,6 @@ def predict(
     end = time.time()
     print(f"⏱️ Tiempo TOTAL del pipeline: {(end - begin1):.2f} segundos.")
     typer.secho(f"✅ ¡Finalizado! Resultados en {output_gff}", fg=typer.colors.GREEN, bold=True)
-    
+
 if __name__ == "__main__":
     app()
