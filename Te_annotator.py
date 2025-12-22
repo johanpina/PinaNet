@@ -11,7 +11,7 @@ from tqdm import tqdm
 from typing import List, Dict
 import torch.nn as nn
 import json
-
+import time
 
 # Filtrar advertencias
 warnings.filterwarnings("ignore")
@@ -137,7 +137,7 @@ def predict(
 ):
     level = level.lower()
     model_dir = f"./models/{level}/"
-    print(model_dir)
+    
     
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
@@ -173,7 +173,7 @@ def predict(
     except Exception as e:
         typer.echo(f"❌ Error al cargar el modelo: {e}")
         raise typer.Exit(1)
-    
+    begin = time.time()
     # --- PIPELINE DE INFERENCIA ---
     dataset = GenomeChunkDataset(fasta_path=fasta_file, tokenizer=tokenizer)
     dataloader = DataLoader(dataset, batch_size=1, num_workers=num_workers)
@@ -209,6 +209,8 @@ def predict(
 
     clean_annotations = merge_annotations(raw_predictions)
     write_gff3(clean_annotations, output_gff)
+    end = time.time()
+    print(f"Tiempo del pipeline: {(end - begin):.2f}  segundos.")
     typer.secho(f"✅ ¡Finalizado! Resultados en {output_gff}", fg=typer.colors.GREEN, bold=True)
 
 if __name__ == "__main__":
