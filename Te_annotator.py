@@ -208,7 +208,7 @@ def predict(
     raw_predictions = []
     
     # Usamos inference_mode para un poco más de velocidad que no_grad
-    with torch.inference_mode():
+    with torch.no_grad():
         for batch in tqdm(dataloader, desc="Anotando"):
             begin = time.time()
             
