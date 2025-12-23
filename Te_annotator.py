@@ -22,14 +22,7 @@ app = typer.Typer(
 )
 
 # --- CONFIGURACIÓN DE RUTAS ---
-# Se asume que los modelos están en una carpeta 'models' en el mismo directorio del script
 BASE_MODELS_PATH = "./models"
-MODEL_MAP = {
-    "binario": "clasificacion_binaria",
-    "orden": "clasificacion_orden",
-    "superfamilia": "clasificacion_superfamilia"
-}
-
 os.environ["TOKENIZERS_PARALLELISM"] = 'True'
 
 # --- 1. DEFINICIÓN DE LA ARQUITECTURA HÍBRIDA ---
@@ -53,13 +46,19 @@ class DNABERT_BiLSTM_NER(nn.Module):
     def forward(self, input_ids, attention_mask=None):
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
         sequence_output = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
+        
+        # Flatten para optimización multi-GPU
+        self.bilstm.flatten_parameters()
+        
         lstm_output, _ = self.bilstm(sequence_output)
         logits = self.classifier(self.dropout(lstm_output))
         return logits
 
-# --- 1. DATASET PARA PARALELIZACIÓN ---
+# --- 2. DATASET (MEGA-CHUNKS) ---
 class GenomeChunkDataset(Dataset):
-    def __init__(self, fasta_path: str, tokenizer, chunk_size=50000, window_size=512, stride=128):
+    # AUMENTAMOS CHUNK_SIZE A 1MB (1_000_000)
+    # Esto reduce la sobrecarga de llamadas en un factor de 20x
+    def __init__(self, fasta_path: str, tokenizer, chunk_size=1_000_000, window_size=512, stride=128):
         self.tokenizer = tokenizer
         self.window_size = window_size
         self.stride = stride
@@ -77,8 +76,7 @@ class GenomeChunkDataset(Dataset):
                     "seq_str": str(record.seq[start:end]).upper(),
                     "global_start": start
                 })
-        print(f"LOG: Secuencia indexada, tiempo: {(time.time() - begin):.2f} segundos.")
-        print(f"✅ {len(self.chunks_metadata)} fragmentos generados.")
+        print(f"LOG: Secuencia indexada en {(time.time() - begin):.2f}s. Total Mega-Chunks: {len(self.chunks_metadata)}")
 
     def __len__(self):
         return len(self.chunks_metadata)
@@ -103,12 +101,14 @@ class GenomeChunkDataset(Dataset):
             "seq_id": meta["seq_id"]
         }
 
-# --- 2. POST-PROCESAMIENTO ---
+# --- 3. POST-PROCESAMIENTO ---
 def merge_annotations(raw_preds: List[Dict], gap_tolerance=10) -> List[Dict]:
     if not raw_preds: return []
+    # Ordenar es vital para el merge
     raw_preds.sort(key=lambda x: (x['seq_id'], x['start']))
     merged = []
     current = raw_preds[0]
+    
     for next_pred in raw_preds[1:]:
         if (next_pred['seq_id'] == current['seq_id'] and 
             next_pred['label'] == current['label'] and 
@@ -125,10 +125,13 @@ def write_gff3(annotations: List[Dict], output_path: str, source="DNABERT2"):
     with open(output_path, "w") as f:
         f.write("##gff-version 3\n")
         for ann in annotations:
-            line = f"{ann['seq_id']}\t{source}\t{ann['label']}\t{ann['start'] + 1}\t{ann['end']}\t.\t+\t.\tID={ann['label']}_{ann['start']}_{ann['end']}\n"
+            # GFF es 1-based
+            start = ann['start'] + 1
+            end = ann['end']
+            line = f"{ann['seq_id']}\t{source}\t{ann['label']}\t{start}\t{end}\t.\t+\t.\tID={ann['label']}_{start}_{end}\n"
             f.write(line)
 
-# --- 3. COMANDO CLI PRINCIPAL ---
+# --- 4. COMANDO CLI PRINCIPAL ---
 @app.command()
 def predict(
     fasta_file: str = typer.Argument(..., help="Archivo FASTA."),
@@ -145,53 +148,45 @@ def predict(
 
     print(f"Using device: {device} ⚙️")
 
-    # --- LÓGICA DE CARGA ---
+    # --- CARGA DEL MODELO ---
     try:
-        begin = time.time()
         tokenizer = AutoTokenizer.from_pretrained("zhihan1996/DNABERT-2-117M", trust_remote_code=True)
-        print(f"LOG: Tokenizador cargado, tiempo: {(time.time() - begin):.2f} segundos.")
-        
-        begin = time.time()
         with open(os.path.join(model_dir, "config.json"), "r") as f:
             config_data = json.load(f)
         
         id2label = {int(k): v for k, v in config_data["id2label"].items()}
         label2id = config_data["label2id"]
         num_labels = len(id2label)
-        print(f"LOG: Etiquetas cargadas, tiempo: {(time.time() - begin):.2f} segundos.")
+        
+        # Identificar ID del Background para filtrar rápido con NumPy
+        bg_id = label2id.get("Background", label2id.get("0", 0))
 
         if level in ["binary", "superfamilies", "binario", "superfamilia", "order", "orden"]:
             typer.echo(f"🧠 Cargando Modelo Híbrido: {level}...")
             SAFE_CHECKPOINT = "quietflamingo/dnabert2-no-flashattention"
-            begin = time.time()
             model = DNABERT_BiLSTM_NER(SAFE_CHECKPOINT, num_labels, id2label, label2id)
             weights_path = os.path.join(model_dir, "pytorch_model.bin")
             model.load_state_dict(torch.load(weights_path, map_location=device), strict=False)
-            print(f"LOG: Modelo cargado, tiempo: {(time.time() - begin):.2f} segundos.")
         else:
             typer.echo(f"🧬 Cargando Modelo Estándar: {level}...")
             model = AutoModelForTokenClassification.from_pretrained(model_dir, trust_remote_code=True)
-        
-        begin = time.time()
 
         if torch.cuda.device_count() > 1 and device == "cuda":
-            print(f"⚡ ¡Multi-GPU Detectado! Usando {torch.cuda.device_count()} GPUs en paralelo.")
+            print(f"⚡ ¡Multi-GPU Detectado! Usando {torch.cuda.device_count()} GPUs.")
             model = nn.DataParallel(model)
 
         model.to(device).eval()    
-        print(f"LOG: Modelo listo, tiempo: {(time.time() - begin):.2f} segundos.")
     except Exception as e:
-        typer.echo(f"❌ Error al cargar el modelo: {e}")
+        typer.echo(f"❌ Error al cargar: {e}")
         raise typer.Exit(1)
 
     begin1 = time.time()
     
-    # --- PIPELINE DE INFERENCIA ---
+    # --- DATASET & DATALOADER ---
+    # Usamos 1MB chunk size (definido en la clase Dataset arriba)
     dataset = GenomeChunkDataset(fasta_path=fasta_file, tokenizer=tokenizer)
-    print(f"LOG: Dataset cargado, tiempo: {(time.time() - begin1):.2f} segundos.")
-    begin = time.time()
-
-    # Batch Size = 1.
+    
+    # Batch Size = 1 (Contiene ~2400 ventanas para 1MB chunk). DataParallel dividirá esto internamente.
     dataloader = DataLoader(
         dataset, 
         batch_size=1, 
@@ -199,74 +194,90 @@ def predict(
         pin_memory=True if device == "cuda" else False
     )
     
-    print(f"LOG: Dataloader listo, tiempo: {(time.time() - begin):.2f} segundos.")
+    final_annotations = []
     
-    raw_predictions = []
-    
+    print("🚀 Iniciando Inferencia Vectorizada...")
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Anotando"):
+        for batch in tqdm(dataloader, desc="Procesando Mega-Chunks"):
             
-            # --- 1. MANEJO INTELIGENTE DE DIMENSIONES ---
-            # El DataLoader devuelve [Batch=1, Num_Windows, Seq_Len=512]
-            # Queremos eliminar SOLO la dimensión del Batch=1 para que quede [Num_Windows, 512]
-            # y que DataParallel pueda repartir esas ventanas.
-            
+            # --- 1. GESTIÓN DE DIMENSIONES ---
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
             
-            # Si tiene 3 dimensiones [1, N, 512], quitamos la primera.
+            # Quitar dimensión del batch (1) para dejar [Num_Windows, 512]
             if input_ids.dim() == 3:
-                input_ids = input_ids.squeeze(0)          # [N, 512]
-                attention_mask = attention_mask.squeeze(0) # [N, 512]
+                input_ids = input_ids.squeeze(0)
+                attention_mask = attention_mask.squeeze(0)
             
-            # Ahora movemos a GPU
+            # Mover a GPU
             input_ids = input_ids.to(device, non_blocking=True)
             attention_mask = attention_mask.to(device, non_blocking=True)
             
             # --- 2. INFERENCIA ---
-            # input_ids ahora es [N, 512]. 
-            # DataParallel dividirá N entre las GPUs (ej: 120 ventanas / 8 GPUs = 15 ventanas/GPU)
+            # DataParallel divide las Num_Windows entre las 8 GPUs
             outputs = model(input_ids, attention_mask=attention_mask)
             logits = outputs.logits if hasattr(outputs, "logits") else outputs
             
-            # logits shape: [N, 512, Num_Labels]
-            # Hacemos argmax sobre la última dimensión (etiquetas)
-            preds = torch.argmax(logits, dim=2).cpu().numpy() # [N, 512]
+            # Recuperar forma [Num_Windows, 512, Num_Labels]
+            B_windows, L, _ = logits.shape
+            logits = logits.view(B_windows, L, -1)
+            
+            # Obtener predicciones (NumPy Array en CPU)
+            # shape: [Num_Windows, 512]
+            preds = torch.argmax(logits, dim=2).cpu().numpy()
 
-            # --- 3. RECONSTRUCCIÓN ---
-            # Recuperamos metadatos del batch (están en CPU)
-            # Como batch_size=1, tomamos el elemento 0 de la lista
-            offset_mapping = batch['offset_mapping'][0] 
+            # --- 3. RECONSTRUCCIÓN VECTORIZADA (LA MAGIA) ---
+            # Recuperamos metadatos (Numpy arrays)
+            # offsets shape: [Num_Windows, 512, 2]
+            offset_mapping = batch['offset_mapping'][0].numpy() 
             global_start = batch['global_start'].item()
             seq_id = batch['seq_id'][0]
 
-            # Iteramos sobre las ventanas (N)
-            # preds es [N, 512]
-            for win_idx, window_pred_ids in enumerate(preds):
-                window_offsets = offset_mapping[win_idx] # (512, 2)
-                
-                for token_idx, label_id in enumerate(window_pred_ids):
-                    label = id2label[label_id]
-                    if label in ["Background", "O"]: continue
-                    
-                    start_l, end_l = window_offsets[token_idx]
-                    if start_l == end_l: continue
+            # A. Máscara Booleana de Validez
+            # 1. Filtramos Background (bg_id)
+            # 2. Filtramos Tokens Especiales (donde start == end en offsets)
+            # offset_mapping[:,:,0] son los starts, offset_mapping[:,:,1] son los ends
+            
+            valid_mask = (preds != bg_id) & (offset_mapping[:, :, 0] != offset_mapping[:, :, 1])
+            
+            if not np.any(valid_mask):
+                continue # Si no hay nada en este chunk, saltamos rápido
 
-                    raw_predictions.append({
-                        "seq_id": seq_id,
-                        "start": global_start + start_l.item(),
-                        "end": global_start + end_l.item(),
-                        "label": label
-                    })
+            # B. Extracción Vectorizada (Sin bucles)
+            # Usamos la máscara para sacar solo los valores útiles aplanados
+            valid_labels_ids = preds[valid_mask]
+            valid_starts_local = offset_mapping[:, :, 0][valid_mask]
+            valid_ends_local = offset_mapping[:, :, 1][valid_mask]
+            
+            # C. Cálculo Global de Coordenadas
+            valid_starts_global = valid_starts_local + global_start
+            valid_ends_global = valid_ends_local + global_start
+            
+            # D. Construcción Rápida de Objetos
+            # Zip en lista de compresión es mucho más rápido que iterar tensores
+            chunk_results = [
+                {
+                    "seq_id": seq_id,
+                    "start": int(s), # Convertir numpy int a python int
+                    "end": int(e),
+                    "label": id2label[l]
+                }
+                for s, e, l in zip(valid_starts_global, valid_ends_global, valid_labels_ids)
+            ]
+            
+            # E. Fusión Parcial (Opcional pero recomendada para ahorrar RAM)
+            # Fusionamos los fragmentos de este chunk inmediatamente
+            chunk_merged = merge_annotations(chunk_results)
+            final_annotations.extend(chunk_merged)
             
     print(f"LOG: Inferencia finalizada.")
-    begin = time.time()
     
-    # --- POST-PROCESAMIENTO ---
-    clean_annotations = merge_annotations(raw_predictions)
-    print(f"LOG: Fusión completada, tiempo: {(time.time() - begin):.2f} segundos.")
+    # --- FUSIÓN FINAL ---
+    # Una última pasada de fusión para unir bordes entre chunks
+    print("🧩 Realizando fusión final de bordes...")
+    final_clean_annotations = merge_annotations(final_annotations)
     
-    write_gff3(clean_annotations, output_gff)
+    write_gff3(final_clean_annotations, output_gff)
     
     end = time.time()
     print(f"⏱️ Tiempo TOTAL del pipeline: {(end - begin1):.2f} segundos.")
