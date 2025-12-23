@@ -1,6 +1,6 @@
-# 🧬 PinaNet CLI: Deep Learning Transposable Element Annotator
+# 🧬 PinaNet: Deep Learning Transposable Element Annotator
 
-**PinaNet CLI** es una herramienta bioinformática de alto rendimiento basada en **Deep Learning** para la detección y anotación automática de Elementos Transponibles (TEs) en secuencias genómicas crudas (FASTA).
+**PinaNet** es una herramienta bioinformática de alto rendimiento basada en **Deep Learning** para la detección y anotación automática de Elementos Transponibles (TEs) en secuencias genómicas crudas (FASTA).
 
 El sistema utiliza una arquitectura híbrida de última generación que combina la capacidad de representación de **DNABERT-2** (un modelo de lenguaje pre-entrenado en ADN) con redes neuronales recurrentes bidireccionales (**BiLSTM**) para capturar el contexto secuencial y estructural de los TEs.
 
@@ -28,8 +28,8 @@ El sistema utiliza una arquitectura híbrida de última generación que combina 
 
 ### 2. Clonar el Repositorio
 ```bash
-git clone https://github.com/TU_USUARIO/PinaNet_CLI.git
-cd PinaNet_CLI
+git clone https://github.com/TU_USUARIO/PinaNet.git
+cd PinaNet
 ```
 
 ### 3. Crear Entorno Virtual
@@ -61,7 +61,7 @@ Debido al gran tamaño de los pesos neuronales, los modelos entrenados **no se i
 La estructura de carpetas debe verse **exactamente** así para que el software los reconozca:
 
 ```text
-PinaNet_CLI/
+PinaNet/
 ├── Te_annotator.py
 ├── models/
 │   ├── binary/            <-- Archivos del modelo Binario
