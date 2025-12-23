@@ -139,6 +139,7 @@ def predict(
     output_gff: str = typer.Argument(..., help="Archivo GFF3 de salida."),
     level: str = typer.Option("binary", help="Classification Level: binary, order, superfamilies."),
     num_workers: int = typer.Option(4, help="CPUs para pre-procesamiento."),
+    chunk_size: int = typer.Option(1_000_000, help="Tamaño del chunk en pb. Ajustar según VRAM."), # <--- NUEVO
     device: str = typer.Option("cuda", help="Dispositivo (cuda/cpu).")
 ):
     # Limpieza preventiva de memoria
@@ -187,8 +188,14 @@ def predict(
     begin1 = time.time()
     
     # 200KB Chunk Size
-    dataset = GenomeChunkDataset(fasta_path=fasta_file, tokenizer=tokenizer)
+    dataset = GenomeChunkDataset(
+        fasta_path=fasta_file, 
+        tokenizer=tokenizer,
+        chunk_size=chunk_size  # <--- USAMOS LA VARIABLE
+    )
     
+    print(f"LOG: Dataset cargado. Chunk Size: {chunk_size/1000} kb.")
+
     dataloader = DataLoader(
         dataset, 
         batch_size=1, 
@@ -265,6 +272,6 @@ def predict(
     end = time.time()
     print(f"⏱️ Tiempo TOTAL: {(end - begin1):.2f} s")
     typer.secho(f"✅ ¡Finalizado!", fg=typer.colors.GREEN, bold=True)
-    
+
 if __name__ == "__main__":
     app()
