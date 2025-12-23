@@ -56,9 +56,9 @@ class DNABERT_BiLSTM_NER(nn.Module):
 
 # --- 2. DATASET (MEGA-CHUNKS) ---
 class GenomeChunkDataset(Dataset):
-    # AUMENTAMOS CHUNK_SIZE A 1MB (1_000_000)
-    # Esto reduce la sobrecarga de llamadas en un factor de 20x
-    def __init__(self, fasta_path: str, tokenizer, chunk_size=1_000_000, window_size=512, stride=128):
+    # AJUSTE: Bajamos de 1MB a 200kb. 
+    # Es el equilibrio perfecto: satura las 8 GPUs sin riesgo de OOM.
+    def __init__(self, fasta_path: str, tokenizer, chunk_size=200000, window_size=512, stride=128):
         self.tokenizer = tokenizer
         self.window_size = window_size
         self.stride = stride
@@ -76,11 +76,12 @@ class GenomeChunkDataset(Dataset):
                     "seq_str": str(record.seq[start:end]).upper(),
                     "global_start": start
                 })
-        print(f"LOG: Secuencia indexada en {(time.time() - begin):.2f}s. Total Mega-Chunks: {len(self.chunks_metadata)}")
+        print(f"LOG: Secuencia indexada en {(time.time() - begin):.2f}s. Total Chunks: {len(self.chunks_metadata)}")
 
     def __len__(self):
         return len(self.chunks_metadata)
-
+        
+    # ... (__getitem__ igual) ...
     def __getitem__(self, idx):
         meta = self.chunks_metadata[idx]
         tokens = self.tokenizer(
@@ -140,6 +141,10 @@ def predict(
     num_workers: int = typer.Option(4, help="CPUs para pre-procesamiento."),
     device: str = typer.Option("cuda", help="Dispositivo (cuda/cpu).")
 ):
+    # Limpieza preventiva de memoria
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     level = level.lower()
     model_dir = f"./models/{level}/"
     
@@ -148,17 +153,16 @@ def predict(
 
     print(f"Using device: {device} ⚙️")
 
-    # --- CARGA DEL MODELO ---
     try:
+        begin = time.time()
         tokenizer = AutoTokenizer.from_pretrained("zhihan1996/DNABERT-2-117M", trust_remote_code=True)
+        
         with open(os.path.join(model_dir, "config.json"), "r") as f:
             config_data = json.load(f)
         
         id2label = {int(k): v for k, v in config_data["id2label"].items()}
         label2id = config_data["label2id"]
         num_labels = len(id2label)
-        
-        # Identificar ID del Background para filtrar rápido con NumPy
         bg_id = label2id.get("Background", label2id.get("0", 0))
 
         if level in ["binary", "superfamilies", "binario", "superfamilia", "order", "orden"]:
@@ -182,11 +186,9 @@ def predict(
 
     begin1 = time.time()
     
-    # --- DATASET & DATALOADER ---
-    # Usamos 1MB chunk size (definido en la clase Dataset arriba)
+    # 200KB Chunk Size
     dataset = GenomeChunkDataset(fasta_path=fasta_file, tokenizer=tokenizer)
     
-    # Batch Size = 1 (Contiene ~2400 ventanas para 1MB chunk). DataParallel dividirá esto internamente.
     dataloader = DataLoader(
         dataset, 
         batch_size=1, 
@@ -196,92 +198,73 @@ def predict(
     
     final_annotations = []
     
-    print("🚀 Iniciando Inferencia Vectorizada...")
+    print("🚀 Iniciando Inferencia Vectorizada (FP16)...")
+    
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Procesando Mega-Chunks"):
+        for batch in tqdm(dataloader, desc="Procesando"):
             
-            # --- 1. GESTIÓN DE DIMENSIONES ---
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
             
-            # Quitar dimensión del batch (1) para dejar [Num_Windows, 512]
             if input_ids.dim() == 3:
                 input_ids = input_ids.squeeze(0)
                 attention_mask = attention_mask.squeeze(0)
             
-            # Mover a GPU
             input_ids = input_ids.to(device, non_blocking=True)
             attention_mask = attention_mask.to(device, non_blocking=True)
             
-            # --- 2. INFERENCIA ---
-            # DataParallel divide las Num_Windows entre las 8 GPUs
-            outputs = model(input_ids, attention_mask=attention_mask)
-            logits = outputs.logits if hasattr(outputs, "logits") else outputs
-            
-            # Recuperar forma [Num_Windows, 512, Num_Labels]
-            B_windows, L, _ = logits.shape
-            logits = logits.view(B_windows, L, -1)
-            
-            # Obtener predicciones (NumPy Array en CPU)
-            # shape: [Num_Windows, 512]
-            preds = torch.argmax(logits, dim=2).cpu().numpy()
+            # --- OPTIMIZACIÓN: FP16 (Mixed Precision) ---
+            # Esto reduce el consumo de VRAM a la mitad y acelera en RTX
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                outputs = model(input_ids, attention_mask=attention_mask)
+                logits = outputs.logits if hasattr(outputs, "logits") else outputs
+                
+                # Des-aplanar dimensiones antes de salir de la GPU
+                B_windows, L, _ = logits.shape
+                logits = logits.view(B_windows, L, -1)
+                
+                # Argmax en GPU es más rápido
+                preds = torch.argmax(logits, dim=2).cpu().numpy()
 
-            # --- 3. RECONSTRUCCIÓN VECTORIZADA (LA MAGIA) ---
-            # Recuperamos metadatos (Numpy arrays)
-            # offsets shape: [Num_Windows, 512, 2]
+            # --- RECONSTRUCCIÓN VECTORIZADA ---
             offset_mapping = batch['offset_mapping'][0].numpy() 
             global_start = batch['global_start'].item()
             seq_id = batch['seq_id'][0]
 
-            # A. Máscara Booleana de Validez
-            # 1. Filtramos Background (bg_id)
-            # 2. Filtramos Tokens Especiales (donde start == end en offsets)
-            # offset_mapping[:,:,0] son los starts, offset_mapping[:,:,1] son los ends
-            
+            # Filtro rápido
             valid_mask = (preds != bg_id) & (offset_mapping[:, :, 0] != offset_mapping[:, :, 1])
             
             if not np.any(valid_mask):
-                continue # Si no hay nada en este chunk, saltamos rápido
+                continue 
 
-            # B. Extracción Vectorizada (Sin bucles)
-            # Usamos la máscara para sacar solo los valores útiles aplanados
             valid_labels_ids = preds[valid_mask]
             valid_starts_local = offset_mapping[:, :, 0][valid_mask]
             valid_ends_local = offset_mapping[:, :, 1][valid_mask]
             
-            # C. Cálculo Global de Coordenadas
             valid_starts_global = valid_starts_local + global_start
             valid_ends_global = valid_ends_local + global_start
             
-            # D. Construcción Rápida de Objetos
-            # Zip en lista de compresión es mucho más rápido que iterar tensores
             chunk_results = [
                 {
                     "seq_id": seq_id,
-                    "start": int(s), # Convertir numpy int a python int
+                    "start": int(s), 
                     "end": int(e),
                     "label": id2label[l]
                 }
                 for s, e, l in zip(valid_starts_global, valid_ends_global, valid_labels_ids)
             ]
             
-            # E. Fusión Parcial (Opcional pero recomendada para ahorrar RAM)
-            # Fusionamos los fragmentos de este chunk inmediatamente
             chunk_merged = merge_annotations(chunk_results)
             final_annotations.extend(chunk_merged)
             
     print(f"LOG: Inferencia finalizada.")
-    
-    # --- FUSIÓN FINAL ---
-    # Una última pasada de fusión para unir bordes entre chunks
-    print("🧩 Realizando fusión final de bordes...")
+    print("🧩 Realizando fusión final...")
     final_clean_annotations = merge_annotations(final_annotations)
-    
     write_gff3(final_clean_annotations, output_gff)
     
     end = time.time()
-    print(f"⏱️ Tiempo TOTAL del pipeline: {(end - begin1):.2f} segundos.")
-    typer.secho(f"✅ ¡Finalizado! Resultados en {output_gff}", fg=typer.colors.GREEN, bold=True)
-
+    print(f"⏱️ Tiempo TOTAL: {(end - begin1):.2f} s")
+    typer.secho(f"✅ ¡Finalizado!", fg=typer.colors.GREEN, bold=True)
+    
 if __name__ == "__main__":
     app()
