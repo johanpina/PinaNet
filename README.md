@@ -9,12 +9,13 @@ El sistema utiliza una arquitectura híbrida de última generación que combina 
 ## 🚀 Características Principales
 
 * **Arquitectura Híbrida Avanzada:** Integra DNABERT-2 (para embeddings ricos de k-mers) + BiLSTM (para memoria secuencial) + Clasificador Lineal.
+* **Soporte Multi-GPU Automático:** Detecta y utiliza automáticamente todas las GPUs disponibles (DataParallel) para dividir la carga de trabajo y acelerar la inferencia exponencialmente.
+* **Inferencia Vectorizada:** Utiliza operaciones de matrices (NumPy/PyTorch) y precisión mixta (FP16) para el post-procesamiento, eliminando los cuellos de botella de la CPU.
 * **3 Niveles de Clasificación:**
     * **Binario:** Detección de presencia/ausencia (TE vs Background).
     * **Orden:** Clasificación taxonómica general (ej. LTR, LINE, SINE, DNA).
     * **Superfamilia:** Clasificación taxonómica detallada (ej. Gypsy, Copia, Mutator, etc.).
-* **Procesamiento Paralelo Eficiente:** Implementa un patrón Productor-Consumidor donde múltiples núcleos de CPU tokenizan y preparan el genoma mientras la GPU realiza la inferencia masiva.
-* **Sliding Window Inteligente:** Procesa genomas completos de cualquier tamaño fragmentándolos en "chunks" de 50kb con ventanas deslizantes y fusión automática de predicciones adyacentes.
+* **Estrategia "Mega-Chunks":** Procesa el genoma en fragmentos masivos configurables (ej. 1MB - 5MB) para saturar la memoria VRAM y minimizar la sobrecarga de comunicación.
 * **Salida Estándar:** Genera archivos **GFF3** compatibles con IGV, JBrowse y otros visores genómicos.
 
 ---
@@ -102,46 +103,48 @@ python Te_annotator.py [ARGUMENTOS] [OPCIONES]
 
 | Opción | Comando | Descripción | Default |
 | :--- | :--- | :--- | :--- |
-| **Nivel** | `--level` | Nivel de clasificación. Valores aceptados: `binary`, `order`, `superfamilies`. | `binary` |
-| **Workers** | `--num-workers` | Número de núcleos de CPU para la tokenización en paralelo. | `4` |
+| **Nivel** | `--level` | Nivel de clasificación: `binary`, `order`, `superfamilies`. | `binary` |
+| **Chunk Size** | `--chunk-size` | Tamaño del fragmento de genoma a procesar en memoria (pares de bases). **Aumentar para mayor velocidad, disminuir si hay error de memoria.** | `200000` |
+| **Workers** | `--num-workers` | Hilos de CPU para cargar datos. Se recomienda mantener bajo (2) ya que la inferencia GPU es muy rápida. | `4` |
 | **Device** | `--device` | Dispositivo de ejecución: `cuda` (GPU) o `cpu`. | `cuda` |
 
 ---
 
 ## 🧪 Ejemplos de Ejecución
 
-### 1. Detección Binaria (TE vs No-TE)
-Escanea el genoma y marca regiones que contienen elementos transponibles sin clasificarlos. Útil para enmascaramiento rápido o detección de densidad.
+### 1. Detección Binaria (Rápida)
+Escanea el genoma usando un chunk grande (2MB) para máxima velocidad en GPUs con buena VRAM (ej. 24GB+).
 
 ```bash
 python Te_annotator.py \
     ./test/genoma_maiz.fasta \
     ./resultados/deteccion_binaria.gff3 \
     --level binary \
-    --num-workers 8 \
-    --device cuda
+    --chunk-size 2000000 \
+    --num-workers 2
 ```
 
-### 2. Clasificación por Órdenes
-Clasifica los elementos encontrados en grandes grupos taxonómicos (LTR, LINE, TIR, etc.).
+### 2. Clasificación por Órdenes (Equilibrada)
+Configuración estándar para GPUs de rango medio (12GB - 16GB VRAM). Chunk de 1MB.
 
 ```bash
 python Te_annotator.py \
     ./test/genoma_arroz.fasta \
     ./resultados/clasificacion_ordenes.gff3 \
     --level order \
+    --chunk-size 1000000 \
     --device cuda
 ```
 
-### 3. Clasificación Fina (Superfamilias)
-El análisis más detallado. Clasifica en familias específicas (Gypsy, Copia, etc.).
+### 3. Clasificación Fina (Segura)
+El análisis más detallado. Si tienes poca VRAM libre, usa el chunk por defecto (200kb).
 
 ```bash
 python Te_annotator.py \
     ./test/genoma_desconocido.fasta \
     ./resultados/full_annotation.gff3 \
     --level superfamilies \
-    --num-workers 4
+    --chunk-size 200000
 ```
 
 ---
@@ -152,8 +155,8 @@ El archivo generado sigue el estándar **GFF3** (Generic Feature Format versión
 
 ```gff
 ##gff-version 3
-chr1	DNABERT2	LTR	10500	12400	.	+	.	ID=LTR_10500_12400;Name=LTR_prediction
-chr1	DNABERT2	LINE	15000	15800	.	+	.	ID=LINE_15000_15800;Name=LINE_prediction
+chr1    DNABERT2    LTR 10500   12400   .   +   .   ID=LTR_10500_12400;Name=LTR_prediction
+chr1    DNABERT2    LINE    15000   15800   .   +   .   ID=LINE_15000_15800;Name=LINE_prediction
 ```
 
 * **Columna 1 (SeqID):** ID de la secuencia (cromosoma/contig).
@@ -166,27 +169,28 @@ chr1	DNABERT2	LINE	15000	15800	.	+	.	ID=LINE_15000_15800;Name=LINE_prediction
 
 ## ⚙️ Arquitectura del Sistema
 
-PinaNet resuelve el problema de la longitud de entrada limitada de los modelos tipo BERT mediante una estrategia de **"Divide y Vencerás"**:
+PinaNet resuelve el problema de la longitud de entrada limitada de los modelos tipo BERT mediante una estrategia de **"Divide y Vencerás"** optimizada:
 
-1.  **Chunking:** El genoma se divide en fragmentos manejables de 50kbp (lazy loading).
-2.  **Sliding Window:** Cada fragmento se subdivide en ventanas de 512 tokens con un solapamiento (*stride*) de 128 tokens para evitar pérdida de información en los bordes.
-3.  **Inferencia Híbrida:**
+1.  **Mega-Chunking:** El genoma se divide en fragmentos grandes (ej. 1MB - 2MB) que se cargan en la VRAM de golpe.
+2.  **Sliding Window Paralelo:** Cada Mega-Chunk contiene miles de ventanas de 512bp. Estas se distribuyen automáticamente entre todas las GPUs disponibles.
+3.  **Inferencia Híbrida (FP16):**
     * **DNABERT-2:** Extrae características profundas de la secuencia de ADN.
-    * **BiLSTM:** Analiza la secuencia de características en ambas direcciones para entender el contexto estructural.
-4.  **Fusión:** Las predicciones de las ventanas se proyectan a coordenadas globales y los fragmentos adyacentes de la misma clase se fusionan en una sola anotación continua.
+    * **BiLSTM:** Analiza el contexto secuencial.
+4.  **Reconstrucción Vectorizada:** Las predicciones se decodifican usando máscaras booleanas de NumPy, evitando bucles lentos de Python y permitiendo procesar millones de bases por segundo.
 
 ---
 
 ## ⚠️ Solución de Problemas Comunes
 
-* **Error `CUDA Out of memory`:** El modelo es grande. Intenta reducir los trabajadores (`--num-workers 0`) para liberar RAM del sistema o asegura que ninguna otra aplicación use la VRAM. El *batch size* interno está optimizado a 1 (lo que equivale a procesar ~150 ventanas de 512bp en paralelo por cada chunk de 50kb).
+* **Error `CUDA Out of memory`:** Estás intentando procesar un fragmento demasiado grande para tu GPU. **Solución:** Reduce el parámetro `--chunk-size`. Prueba bajando de `1000000` a `200000`.
 * **Error `Model not found`:** Verifica que hayas copiado las carpetas `binary`, `order` y `superfamilies` dentro de la carpeta `models/` y que los nombres coincidan exactamente.
-* **Advertencias de `Triton / Flash Attention`:** Son normales si no tienes la arquitectura de GPU más reciente (Hopper/Ampere). El sistema está configurado para cambiar automáticamente a una implementación compatible (PyTorch nativo).
+* **Advertencias de `Triton / Flash Attention`:** Son normales si no tienes la arquitectura de GPU más reciente (Hopper/Ampere). El sistema está configurado para cambiar automáticamente a una implementación compatible.
 
 ---
 
 ## 📝 Licencia
 
+Este proyecto está bajo la licencia [MIT](LICENSE).
 
 ---
 **Desarrollado por Johan S. Piña - 2025**
