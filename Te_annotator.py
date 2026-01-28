@@ -121,7 +121,7 @@ def merge_annotations(raw_preds: List[Dict], gap_tolerance=10) -> List[Dict]:
     merged.append(current)
     return merged
 
-def write_gff3(annotations: List[Dict], output_path: str, source="DNABERT2"):
+def write_gff3(annotations: List[Dict], output_path: str, source="PinaNet"):
     print(f"💾 Guardando {len(annotations)} anotaciones en {output_path}...")
     with open(output_path, "w") as f:
         f.write("##gff-version 3\n")
@@ -132,12 +132,35 @@ def write_gff3(annotations: List[Dict], output_path: str, source="DNABERT2"):
             line = f"{ann['seq_id']}\t{source}\t{ann['label']}\t{start}\t{end}\t.\t+\t.\tID={ann['label']}_{start}_{end}\n"
             f.write(line)
 
+def write_fasta_library(annotations: List[Dict], genome_path: str, output_path: str):
+    """
+    Genera una librería FASTA a partir de las anotaciones GFF.
+    """
+    print(f"📚 Generando librería FASTA en {output_path}...")
+    try:
+        genome = SeqIO.to_dict(SeqIO.parse(genome_path, "fasta"))
+        with open(output_path, "w") as f:
+            for i, ann in enumerate(annotations):
+                seq_id = ann['seq_id']
+                start = ann['start'] # 0-based
+                end = ann['end']
+                label = ann['label']
+                
+                if seq_id in genome:
+                    # Formato de cabecera: >TE_1#LTR/Gypsy
+                    header = f">TE_{i+1}#{label}"
+                    sequence = str(genome[seq_id].seq[start:end])
+                    f.write(f"{header}\n{sequence}\n")
+    except Exception as e:
+        print(f"⚠️ Error al generar la librería FASTA: {e}")
+
 # --- 4. COMANDO CLI PRINCIPAL ---
 @app.command()
 def predict(
     fasta_file: str = typer.Argument(..., help="Archivo FASTA."),
     output_gff: str = typer.Argument(..., help="Archivo GFF3 de salida."),
     level: str = typer.Option("binary", help="Classification Level: binary, order, superfamilies."),
+    create_library: bool = typer.Option(True, help="Generar librería FASTA de secuencias candidatas."),
     num_workers: int = typer.Option(4, help="CPUs para pre-procesamiento."),
     chunk_size: int = typer.Option(1_000_000, help="Tamaño del chunk en pb. Ajustar según VRAM."), # <--- NUEVO
     device: str = typer.Option("cuda", help="Dispositivo (cuda/cpu).")
@@ -269,6 +292,10 @@ def predict(
     final_clean_annotations = merge_annotations(final_annotations)
     write_gff3(final_clean_annotations, output_gff)
     
+    if create_library:
+        fasta_library_path = f"{output_gff}.fasta"
+        write_fasta_library(final_clean_annotations, fasta_file, fasta_library_path)
+
     end = time.time()
     print(f"⏱️ Tiempo TOTAL: {(end - begin1):.2f} s")
     typer.secho(f"✅ ¡Finalizado!", fg=typer.colors.GREEN, bold=True)
