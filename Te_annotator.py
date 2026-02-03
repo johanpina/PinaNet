@@ -162,7 +162,7 @@ def predict(
     level: str = typer.Option("binary", help="Classification Level: binary, order, superfamilies."),
     create_library: bool = typer.Option(True, help="Generar librería FASTA de secuencias candidatas."),
     num_workers: int = typer.Option(4, help="CPUs para pre-procesamiento."),
-    chunk_size: int = typer.Option(1_000_000, help="Tamaño del chunk en pb. Ajustar según VRAM."), # <--- NUEVO
+    chunk_size: int = typer.Option(1000000, help="Tamaño del chunk en pb. Ajustar según VRAM."),
     device: str = typer.Option("cuda", help="Dispositivo (cuda/cpu).")
 ):
     # Limpieza preventiva de memoria
