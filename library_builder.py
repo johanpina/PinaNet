@@ -13,26 +13,88 @@ app = typer.Typer(
 )
 
 # --- 1. VERIFICACIÓN DE DEPENDENCIAS ---
-def check_dependencies():
-    """Verifica que mmseqs, mafft y CIAlign estén instalados y en PATH."""
-    tools = {
+def check_dependencies() -> bool:
+    """
+    Verifica que mmseqs y mafft estén instalados (obligatorios).
+    CIAlign es opcional: si no está, se usa fallback en Python.
+    Retorna True si CIAlign está disponible, False si no.
+    """
+    required = {
         "mmseqs": "MMseqs2 (conda install -c bioconda mmseqs2)",
         "mafft": "MAFFT (conda install -c bioconda mafft)",
-        "CIAlign": "CIAlign (pip install cialign)"
     }
     missing = []
-    for cmd, install_hint in tools.items():
+    for cmd, install_hint in required.items():
         if shutil.which(cmd) is None:
             missing.append(f"  - {cmd}: {install_hint}")
 
     if missing:
-        typer.echo("❌ Dependencias no encontradas en PATH:")
+        typer.echo("❌ Dependencias obligatorias no encontradas en PATH:")
         for m in missing:
             typer.echo(m)
         typer.echo("\nInstala las dependencias faltantes y vuelve a ejecutar.")
         raise typer.Exit(1)
 
-    typer.echo("✅ Todas las dependencias encontradas.")
+    cialign_available = shutil.which("CIAlign") is not None
+    if cialign_available:
+        typer.echo("✅ Todas las dependencias encontradas (mmseqs, mafft, CIAlign).")
+    else:
+        typer.echo("✅ mmseqs y mafft encontrados.")
+        typer.echo("   ℹ️ CIAlign no encontrado. Se usará generador de consenso Python (fallback).")
+
+    return cialign_available
+
+
+# --- FALLBACK: CONSENSO EN PYTHON PURO ---
+def python_consensus_from_msa(msa_path: str, consensus_path: str) -> bool:
+    """
+    Genera una secuencia consenso por voto mayoritario desde un MSA FASTA.
+    No requiere dependencias externas. Retorna True si tuvo éxito.
+    """
+    from collections import Counter
+
+    # Leer secuencias alineadas
+    sequences = []
+    current_seq = []
+    with open(msa_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith(">"):
+                if current_seq:
+                    sequences.append("".join(current_seq))
+                current_seq = []
+            else:
+                current_seq.append(line)
+        if current_seq:
+            sequences.append("".join(current_seq))
+
+    if not sequences:
+        return False
+
+    # Voto mayoritario por columna (ignorando gaps)
+    aln_len = max(len(s) for s in sequences)
+    consensus = []
+
+    for col in range(aln_len):
+        bases = []
+        for seq in sequences:
+            if col < len(seq):
+                c = seq[col].upper()
+                if c not in ("-", "."):
+                    bases.append(c)
+
+        if bases:
+            most_common = Counter(bases).most_common(1)[0][0]
+            consensus.append(most_common)
+
+    if not consensus:
+        return False
+
+    consensus_seq = "".join(consensus)
+    with open(consensus_path, "w") as f:
+        f.write(f">consensus\n{consensus_seq}\n")
+
+    return True
 
 
 # --- 2. CLUSTERING CON MMSEQS2 ---
@@ -152,13 +214,13 @@ def parse_clusters_and_split(
     return cluster_info
 
 
-# --- 4. WORKER: MAFFT + CIAlign POR CLUSTER ---
+# --- 4. WORKER: MAFFT + CONSENSO POR CLUSTER ---
 def process_single_cluster(args: Tuple) -> Dict:
     """
-    Worker que ejecuta MAFFT → CIAlign para un solo cluster.
+    Worker que ejecuta MAFFT → CIAlign (o fallback Python) para un solo cluster.
     Diseñado para ser llamado desde multiprocessing.Pool.
     """
-    cluster, consensus_dir, mafft_threads = args
+    cluster, consensus_dir, mafft_threads, use_cialign = args
     idx = cluster["idx"]
     fasta_path = cluster["fasta_path"]
     size = cluster["size"]
@@ -170,23 +232,24 @@ def process_single_cluster(args: Tuple) -> Dict:
         "size": size,
         "success": False,
         "consensus_path": None,
+        "method": None,
         "error": None
     }
 
     clusters_dir = os.path.dirname(fasta_path)
     msa_path = os.path.join(clusters_dir, f"cluster_{idx}_msa.fasta")
     consensus_stem = os.path.join(consensus_dir, f"cluster_{idx}")
+    consensus_path = f"{consensus_stem}_consensus.fasta"
 
     try:
         # --- Caso especial: cluster con 1 sola secuencia ---
         if size == 1:
-            # Copiar directamente como consenso (no hay nada que alinear)
-            consensus_path = f"{consensus_stem}_consensus.fasta"
             with open(fasta_path, "r") as fin, open(consensus_path, "w") as fout:
                 for line in fin:
                     fout.write(line)
             result["success"] = True
             result["consensus_path"] = consensus_path
+            result["method"] = "copy"
             return result
 
         # --- MAFFT: Alineamiento Múltiple ---
@@ -203,37 +266,46 @@ def process_single_cluster(args: Tuple) -> Dict:
             )
 
         if mafft_result.returncode != 0:
-            result["error"] = f"MAFFT falló: {mafft_result.stderr[:200]}"
+            result["error"] = f"MAFFT falló: {mafft_result.stderr[:500]}"
             return result
 
-        # Verificar que el MSA no esté vacío
         if os.path.getsize(msa_path) == 0:
             result["error"] = "MAFFT generó un archivo vacío."
             return result
 
-        # --- CIAlign: Generar Consenso ---
-        cialign_cmd = [
-            "CIAlign",
-            "--infile", msa_path,
-            "--outfile_stem", consensus_stem,
-            "--make_consensus",
-            "--consensus_type", "majority_nongap",
-            "--silent"
-        ]
-        cialign_result = subprocess.run(
-            cialign_cmd, capture_output=True, text=True
-        )
+        # --- GENERAR CONSENSO ---
+        cialign_ok = False
 
-        if cialign_result.returncode != 0:
-            result["error"] = f"CIAlign falló: {cialign_result.stderr[:200]}"
-            return result
+        if use_cialign:
+            # Intentar con CIAlign primero
+            cialign_cmd = [
+                "CIAlign",
+                "--infile", msa_path,
+                "--outfile_stem", consensus_stem,
+                "--make_consensus",
+                "--consensus_type", "majority_nongap",
+            ]
+            cialign_result = subprocess.run(
+                cialign_cmd, capture_output=True, text=True
+            )
 
-        consensus_path = f"{consensus_stem}_consensus.fasta"
-        if os.path.exists(consensus_path) and os.path.getsize(consensus_path) > 0:
-            result["success"] = True
-            result["consensus_path"] = consensus_path
-        else:
-            result["error"] = "CIAlign no generó archivo de consenso."
+            if (cialign_result.returncode == 0
+                    and os.path.exists(consensus_path)
+                    and os.path.getsize(consensus_path) > 0):
+                cialign_ok = True
+                result["success"] = True
+                result["consensus_path"] = consensus_path
+                result["method"] = "CIAlign"
+
+        # Fallback: consenso Python si CIAlign falló o no está disponible
+        if not cialign_ok:
+            fallback_ok = python_consensus_from_msa(msa_path, consensus_path)
+            if fallback_ok:
+                result["success"] = True
+                result["consensus_path"] = consensus_path
+                result["method"] = "python_fallback"
+            else:
+                result["error"] = "Fallback Python también falló (MSA vacío o sin bases)."
 
     except Exception as e:
         result["error"] = str(e)
@@ -307,7 +379,7 @@ def build(
     typer.echo("=" * 60)
 
     # Paso 0: Verificar dependencias
-    check_dependencies()
+    cialign_available = check_dependencies()
 
     # Paso 1: Clustering
     typer.echo("\n" + "─" * 40)
@@ -336,7 +408,7 @@ def build(
 
     # Preparar argumentos para el Pool
     pool_args = [
-        (cluster, consensus_dir, mafft_threads)
+        (cluster, consensus_dir, mafft_threads, cialign_available)
         for cluster in cluster_info
     ]
 
@@ -351,6 +423,10 @@ def build(
     library_path = os.path.join(output_dir, "consensus_library.fasta")
     success_count, fail_count = merge_consensus_library(results, library_path)
 
+    # Estadísticas por método
+    from collections import Counter
+    method_counts = Counter(r.get("method") for r in results if r["success"])
+
     # Resumen
     elapsed = time.time() - begin
     typer.echo("\n" + "=" * 60)
@@ -358,15 +434,24 @@ def build(
     typer.echo("=" * 60)
     typer.echo(f"   Clusters procesados:  {success_count}")
     typer.echo(f"   Clusters con error:   {fail_count}")
+    if method_counts:
+        typer.echo(f"   Método CIAlign:       {method_counts.get('CIAlign', 0)}")
+        typer.echo(f"   Método fallback Py:   {method_counts.get('python_fallback', 0)}")
+        typer.echo(f"   Copiados (1 seq):     {method_counts.get('copy', 0)}")
     typer.echo(f"   Librería final:       {library_path}")
     typer.echo(f"   Tiempo total:         {elapsed:.1f}s")
     typer.echo("=" * 60)
 
     if fail_count > 0:
-        typer.echo("\n⚠️ Clusters con errores:")
+        typer.echo(f"\n⚠️ {fail_count} clusters con errores (primeros 20):")
+        error_count = 0
         for r in results:
             if not r["success"]:
                 typer.echo(f"   Cluster {r['idx']} ({r['rep']}): {r['error']}")
+                error_count += 1
+                if error_count >= 20:
+                    typer.echo(f"   ... y {fail_count - 20} más.")
+                    break
 
     typer.secho(f"\n✅ ¡Librería generada exitosamente!", fg=typer.colors.GREEN, bold=True)
 
