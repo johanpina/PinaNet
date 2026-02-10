@@ -9,7 +9,7 @@ The system uses a state-of-the-art hybrid architecture that combines the represe
 ## 🚀 Key Features
 
 *   **Advanced Hybrid Architecture:** Integrates DNABERT-2 (for rich k-mer embeddings) + BiLSTM (for sequential memory) + Linear Classifier.
-*   **Automatic Multi-GPU Support:** Automatically detects and uses all available GPUs (DataParallel) to split the workload and exponentially accelerate inference.
+*   **Configurable Multi-GPU Support:** Automatically detects and uses all available GPUs by default (DataParallel). Optionally, you can select specific GPU IDs (`--gpu-ids`) or limit the number of GPUs (`--num-gpus`) to fine-tune resource usage.
 *   **Vectorized Inference:** Uses matrix operations (NumPy/PyTorch) and mixed precision (FP16) for post-processing, eliminating CPU bottlenecks.
 *   **3 Levels of Classification:**
     *   **Binary:** Presence/absence detection (TE vs. Background).
@@ -101,13 +101,15 @@ python Te_annotator.py [ARGUMENTS] [OPTIONS]
 
 ### Options and Parameters
 
-| Option       | Command         | Description                                                                                             | Default     | 
+| Option       | Command         | Description                                                                                             | Default     |
 | :----------- | :-------------- | :------------------------------------------------------------------------------------------------------ | :---------- |
 | **Level**    | `--level`       | Classification level: `binary`, `order`, `superfamilies`.                                               | `binary`    |
 | **Create Library** | `--create-library` | Generate a FASTA library of candidate TE sequences. Use `--no-create-library` to disable.             | `True`      |
 | **Chunk Size** | `--chunk-size`  | Size of the genome fragment to process in memory (base pairs). **Increase for higher speed, decrease if there is a memory error.** | `2,000,000`   |
 | **Workers**  | `--num-workers` | CPU threads for data loading. It is recommended to keep it low (2) as GPU inference is very fast.      | `4`         |
 | **Device**   | `--device`      | Execution device: `cuda` (GPU) or `cpu`.                                                                | `cuda`      |
+| **GPU IDs**  | `--gpu-ids`     | Comma-separated list of specific GPU IDs to use (e.g., `0,2,3`). Useful when sharing a server or when certain GPUs are busy. | `None` (all) |
+| **Num GPUs** | `--num-gpus`    | Maximum number of GPUs to use, selected sequentially starting from GPU 0. `0` means use all available.  | `0` (all)   |
 
 ---
 
@@ -147,6 +149,52 @@ python Te_annotator.py \
     --level superfamilies \
     --chunk-size 200000
 ```
+
+### 4. Multi-GPU Configuration Examples
+
+By default, PinaNet detects and uses **all available GPUs** automatically. The following options allow you to control which and how many GPUs are used.
+
+**Use only specific GPUs by their IDs** (e.g., GPUs 0 and 2 on a 4-GPU server):
+
+```bash
+python Te_annotator.py \
+    ./test/corn_genome.fasta \
+    ./results/binary_detection.gff3 \
+    --level binary \
+    --gpu-ids "0,2"
+```
+
+**Limit to a fixed number of GPUs** (e.g., use only the first 2 GPUs on an 8-GPU node):
+
+```bash
+python Te_annotator.py \
+    ./test/corn_genome.fasta \
+    ./results/order_classification.gff3 \
+    --level order \
+    --num-gpus 2
+```
+
+**Run on a single GPU** (useful for debugging or when sharing resources):
+
+```bash
+python Te_annotator.py \
+    ./test/corn_genome.fasta \
+    ./results/binary_detection.gff3 \
+    --level binary \
+    --gpu-ids "0"
+```
+
+**Force CPU execution** (no GPU required):
+
+```bash
+python Te_annotator.py \
+    ./test/corn_genome.fasta \
+    ./results/binary_detection.gff3 \
+    --level binary \
+    --device cpu
+```
+
+> **Note:** If neither `--gpu-ids` nor `--num-gpus` is specified, PinaNet will automatically use all available GPUs. The `--gpu-ids` option takes precedence over `--num-gpus` if both are provided.
 
 ---
 
@@ -193,7 +241,7 @@ This library is useful for downstream analyses like building consensus sequences
 PinaNet solves the problem of the limited input length of BERT-like models through an optimized **"Divide and Conquer"** strategy:
 
 1.  **Mega-Chunking:** The genome is divided into large fragments (e.g., 1,000,000 - 2,000,000 bp) that are loaded into VRAM at once.
-2.  **Parallel Sliding Window:** Each Mega-Chunk contains thousands of 512bp windows. These are automatically distributed among all available GPUs.
+2.  **Parallel Sliding Window:** Each Mega-Chunk contains thousands of 512bp windows. These are automatically distributed among the selected GPUs (all by default, or a user-defined subset via `--gpu-ids` / `--num-gpus`).
 3.  **Hybrid Inference (FP16):**
     *   **DNABERT-2:** Extracts deep features from the DNA sequence.
     *   **BiLSTM:** Analyzes the sequential context.

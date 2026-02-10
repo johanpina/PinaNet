@@ -163,7 +163,9 @@ def predict(
     create_library: bool = typer.Option(True, help="Generar librería FASTA de secuencias candidatas."),
     num_workers: int = typer.Option(4, help="CPUs para pre-procesamiento."),
     chunk_size: int = typer.Option(1000000, help="Tamaño del chunk en pb. Ajustar según VRAM."),
-    device: str = typer.Option("cuda", help="Dispositivo (cuda/cpu).")
+    device: str = typer.Option("cuda", help="Dispositivo (cuda/cpu)."),
+    gpu_ids: str = typer.Option(None, help="IDs de GPUs a usar, separados por coma (ej: '0,1,2'). Por defecto usa todas."),
+    num_gpus: int = typer.Option(0, help="Número máximo de GPUs a usar. 0 = usar todas las disponibles.")
 ):
     # Limpieza preventiva de memoria
     if torch.cuda.is_available():
@@ -174,6 +176,43 @@ def predict(
     
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
+
+    # --- RESOLUCIÓN DE GPUs ---
+    selected_device_ids = None  # None = usar todas (comportamiento por defecto de DataParallel)
+
+    if device == "cuda" and torch.cuda.is_available():
+        total_gpus = torch.cuda.device_count()
+
+        if gpu_ids is not None:
+            # El usuario especificó IDs exactos: --gpu-ids "0,2,3"
+            try:
+                selected_device_ids = [int(x.strip()) for x in gpu_ids.split(",")]
+                # Validar que los IDs existan
+                invalid_ids = [gid for gid in selected_device_ids if gid >= total_gpus or gid < 0]
+                if invalid_ids:
+                    typer.echo(f"⚠️ GPU IDs inválidos: {invalid_ids}. Disponibles: 0-{total_gpus - 1}")
+                    raise typer.Exit(1)
+            except ValueError:
+                typer.echo(f"❌ Formato inválido para --gpu-ids. Usa números separados por coma, ej: '0,1,2'")
+                raise typer.Exit(1)
+        elif num_gpus > 0:
+            # El usuario especificó cuántas GPUs usar: --num-gpus 4
+            effective_num = min(num_gpus, total_gpus)
+            selected_device_ids = list(range(effective_num))
+
+        # Información de GPUs
+        if selected_device_ids is not None:
+            print(f"🎯 GPUs seleccionadas: {selected_device_ids} (de {total_gpus} disponibles)")
+            for gid in selected_device_ids:
+                print(f"   GPU {gid}: {torch.cuda.get_device_name(gid)}")
+            primary_device = f"cuda:{selected_device_ids[0]}"
+        else:
+            print(f"🎯 Usando todas las GPUs disponibles: {total_gpus}")
+            for gid in range(total_gpus):
+                print(f"   GPU {gid}: {torch.cuda.get_device_name(gid)}")
+            primary_device = "cuda:0"
+
+        device = primary_device
 
     print(f"Using device: {device} ⚙️")
 
@@ -199,9 +238,15 @@ def predict(
             typer.echo(f"🧬 Cargando Modelo Estándar: {level}...")
             model = AutoModelForTokenClassification.from_pretrained(model_dir, trust_remote_code=True)
 
-        if torch.cuda.device_count() > 1 and device == "cuda":
-            print(f"⚡ ¡Multi-GPU Detectado! Usando {torch.cuda.device_count()} GPUs.")
-            model = nn.DataParallel(model)
+        use_multi_gpu = (
+            "cuda" in device
+            and torch.cuda.device_count() > 1
+            and (selected_device_ids is None or len(selected_device_ids) > 1)
+        )
+        if use_multi_gpu:
+            ngpus = len(selected_device_ids) if selected_device_ids else torch.cuda.device_count()
+            print(f"⚡ ¡Multi-GPU Activado! Usando {ngpus} GPUs con device_ids={selected_device_ids or 'todas'}.")
+            model = nn.DataParallel(model, device_ids=selected_device_ids)
 
         model.to(device).eval()    
     except Exception as e:
@@ -223,7 +268,7 @@ def predict(
         dataset, 
         batch_size=1, 
         num_workers=num_workers,    
-        pin_memory=True if device == "cuda" else False
+        pin_memory=True if "cuda" in device else False
     )
     
     final_annotations = []
@@ -245,7 +290,8 @@ def predict(
             
             # --- OPTIMIZACIÓN: FP16 (Mixed Precision) ---
             # Esto reduce el consumo de VRAM a la mitad y acelera en RTX
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            autocast_device = "cuda" if "cuda" in device else "cpu"
+            with torch.amp.autocast(device_type=autocast_device, dtype=torch.float16):
                 outputs = model(input_ids, attention_mask=attention_mask)
                 logits = outputs.logits if hasattr(outputs, "logits") else outputs
                 
