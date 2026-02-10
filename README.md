@@ -236,6 +236,102 @@ This library is useful for downstream analyses like building consensus sequences
 
 ---
 
+## 📚 Library Builder (Clustering + Consensus Pipeline)
+
+PinaNet includes a second script, `library_builder.py`, that takes the candidate FASTA library and generates a **consensus library** through clustering and multiple sequence alignment.
+
+### Pipeline
+
+```
+Candidate FASTA → MMseqs2 (clustering) → MAFFT (MSA per cluster) → CIAlign (consensus per MSA)
+```
+
+### Additional Dependencies
+
+These tools must be installed in your conda environment before using `library_builder.py`:
+
+```bash
+conda install -c bioconda -c conda-forge mmseqs2 mafft
+pip install cialign
+```
+
+### Usage
+
+```bash
+python library_builder.py [FASTA_INPUT] [OUTPUT_DIR] [OPTIONS]
+```
+
+### Arguments
+
+| Argument      | Description                                              | Required |
+| :------------ | :------------------------------------------------------- | :------: |
+| `fasta_input` | FASTA file of candidate TEs (output from `Te_annotator.py`). |    ✅    |
+| `output_dir`  | Directory where all results will be saved.               |    ✅    |
+
+### Options
+
+| Option              | Command              | Description                                                              | Default |
+| :------------------ | :------------------- | :----------------------------------------------------------------------- | :------ |
+| **Min Seq ID**      | `--min-seq-id`       | Minimum sequence identity for MMseqs2 clustering (0-1).                  | `0.8`   |
+| **Coverage**        | `--coverage`         | Minimum alignment coverage for MMseqs2 clustering (0-1).                 | `0.8`   |
+| **Threads**         | `--threads`          | CPU threads for MMseqs2 and MAFFT.                                       | `4`     |
+| **Workers**         | `--workers`          | Parallel processes for MAFFT + CIAlign (multiprocessing).                | `4`     |
+| **Min Cluster Size**| `--min-cluster-size` | Minimum sequences in a cluster to generate MSA. Smaller clusters are skipped. | `2`     |
+
+### Examples
+
+**Basic run using default parameters:**
+
+```bash
+python library_builder.py \
+    ./results/binary_detection.gff3.fasta \
+    ./results/library_output/
+```
+
+**Fine-tune clustering stringency and parallelism:**
+
+```bash
+python library_builder.py \
+    ./results/order_classification.gff3.fasta \
+    ./results/library_output/ \
+    --min-seq-id 0.6 \
+    --coverage 0.7 \
+    --threads 8 \
+    --workers 6 \
+    --min-cluster-size 3
+```
+
+**Include singleton clusters (clusters with 1 sequence):**
+
+```bash
+python library_builder.py \
+    ./results/binary_detection.gff3.fasta \
+    ./results/library_output/ \
+    --min-cluster-size 1
+```
+
+### Output Structure
+
+```text
+output_dir/
+├── clusterRes_cluster.tsv          ← MMseqs2 cluster assignments
+├── clusterRes_rep_seq.fasta        ← Representative sequences
+├── clusterRes_all_seqs.fasta       ← All sequences with clusters
+├── tmp/                            ← MMseqs2 temp files
+├── clusters/
+│   ├── cluster_0.fasta             ← Sequences per cluster
+│   ├── cluster_0_msa.fasta         ← MAFFT alignment per cluster
+│   └── ...
+├── consensus/
+│   ├── cluster_0_consensus.fasta   ← CIAlign consensus per cluster
+│   └── ...
+└── consensus_library.fasta         ← FINAL CONSENSUS LIBRARY
+```
+
+The final file `consensus_library.fasta` contains one consensus sequence per cluster and can be used directly with tools like RepeatMasker (`-lib consensus_library.fasta`).
+
+---
+
 ## ⚙️ System Architecture
 
 PinaNet solves the problem of the limited input length of BERT-like models through an optimized **"Divide and Conquer"** strategy:
