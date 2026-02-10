@@ -233,7 +233,28 @@ def predict(
             SAFE_CHECKPOINT = "quietflamingo/dnabert2-no-flashattention"
             model = DNABERT_BiLSTM_NER(SAFE_CHECKPOINT, num_labels, id2label, label2id)
             weights_path = os.path.join(model_dir, "pytorch_model.bin")
-            model.load_state_dict(torch.load(weights_path, map_location=device), strict=False)
+            if not os.path.exists(weights_path):
+                typer.echo(f"❌ Archivo de pesos no encontrado: {weights_path}")
+                raise typer.Exit(1)
+
+            state_dict = torch.load(weights_path, map_location=device)
+            load_result = model.load_state_dict(state_dict, strict=False)
+
+            # --- VERIFICACIÓN DE CARGA DE PESOS ---
+            total_keys = len(model.state_dict())
+            loaded_keys = total_keys - len(load_result.missing_keys)
+            print(f"📦 Pesos cargados: {loaded_keys}/{total_keys} capas desde {weights_path}")
+            if load_result.missing_keys:
+                print(f"   ⚠️ Capas NO cargadas (inicializadas random): {load_result.missing_keys}")
+            if load_result.unexpected_keys:
+                print(f"   ⚠️ Capas en el archivo pero no en el modelo: {load_result.unexpected_keys}")
+            if loaded_keys == 0:
+                typer.echo("❌ ALERTA: Ningún peso fue cargado. El modelo está completamente random.")
+                raise typer.Exit(1)
+            elif len(load_result.missing_keys) > 0:
+                print(f"   ℹ️ {len(load_result.missing_keys)} capas quedan con pesos random. Revisar si es esperado.")
+            else:
+                print(f"   ✅ Todos los pesos fueron cargados correctamente.")
         else:
             typer.echo(f"🧬 Cargando Modelo Estándar: {level}...")
             model = AutoModelForTokenClassification.from_pretrained(model_dir, trust_remote_code=True)
