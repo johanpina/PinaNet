@@ -121,7 +121,7 @@ def merge_annotations(raw_preds: List[Dict], gap_tolerance=10) -> List[Dict]:
     merged.append(current)
     return merged
 
-def write_gff3(annotations: List[Dict], output_path: str, source="PinaNet"):
+def write_gff3(annotations: List[Dict], output_path: str, source="TEGER"):
     print(f"💾 Guardando {len(annotations)} anotaciones en {output_path}...")
     with open(output_path, "w") as f:
         f.write("##gff-version 3\n")

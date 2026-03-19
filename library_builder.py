@@ -8,7 +8,7 @@ from multiprocessing import Pool
 from typing import Dict, List, Tuple
 
 app = typer.Typer(
-    name="PinaNet Library Builder",
+    name="TEGER Library Builder",
     help="Pipeline para generar librerías consenso: MMseqs2 → MAFFT → CIAlign."
 )
 
@@ -343,7 +343,7 @@ def merge_consensus_library(
 # --- 6. COMANDO CLI PRINCIPAL ---
 @app.command()
 def build(
-    fasta_input: str = typer.Argument(..., help="Archivo FASTA de candidatos (salida de PinaNet)."),
+    fasta_input: str = typer.Argument(..., help="Archivo FASTA de candidatos (salida de TEGER)."),
     output_dir: str = typer.Argument(..., help="Directorio de salida para todos los resultados."),
     min_seq_id: float = typer.Option(0.8, help="Identidad mínima de secuencia para clustering MMseqs2."),
     coverage: float = typer.Option(0.8, help="Cobertura mínima para clustering MMseqs2."),
@@ -353,7 +353,7 @@ def build(
 ):
     """
     Pipeline completo: MMseqs2 clustering → MAFFT MSA → CIAlign consenso.
-    Genera una librería FASTA de secuencias consenso a partir de los candidatos de PinaNet.
+    Genera una librería FASTA de secuencias consenso a partir de los candidatos de TEGER.
     """
     begin = time.time()
 
@@ -367,7 +367,7 @@ def build(
     os.makedirs(consensus_dir, exist_ok=True)
 
     typer.echo("=" * 60)
-    typer.echo("🧬 PinaNet Library Builder")
+    typer.echo("🧬 TEGER Library Builder")
     typer.echo("=" * 60)
     typer.echo(f"   Input:           {fasta_input}")
     typer.echo(f"   Output:          {output_dir}")
