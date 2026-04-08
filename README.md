@@ -1,6 +1,6 @@
-# 🧬 TEGER: Transposable Elements Genomic Entity Recognition
+# 🧬 TE-GER: Transposable Elements Genomic Entity Recognition
 
-**TEGER** is a high-performance bioinformatics tool based on **Deep Learning** for the automatic detection and annotation of Transposable Elements (TEs) in raw genomic sequences (FASTA).
+**TE-GER** is a high-performance bioinformatics tool based on **Deep Learning** for the automatic detection and annotation of Transposable Elements (TEs) in raw genomic sequences (FASTA).
 
 The system uses a state-of-the-art hybrid architecture that combines the representational power of **DNABERT-2** (a language model pre-trained on DNA) with bidirectional recurrent neural networks (**BiLSTM**) to capture the sequential and structural context of TEs.
 
@@ -29,8 +29,8 @@ The system uses a state-of-the-art hybrid architecture that combines the represe
 
 ### 2. Clone the Repository
 ```bash
-git clone https://github.com/YOUR_USERNAME/TEGER.git
-cd TEGER
+git clone https://github.com/YOUR_USERNAME/TE-GER.git
+cd TE-GER
 ```
 
 ### 3. Create a Virtual Environment
@@ -62,7 +62,7 @@ Due to the large size of the neural weights, the trained models are **not includ
 The folder structure must look **exactly** like this for the software to recognize them:
 
 ```text
-TEGER/
+TE-GER/
 ├── Te_annotator.py
 ├── models/
 │   ├── binary/            <-- Binary model files
@@ -152,7 +152,7 @@ python Te_annotator.py \
 
 ### 4. Multi-GPU Configuration Examples
 
-By default, TEGER detects and uses **all available GPUs** automatically. The following options allow you to control which and how many GPUs are used.
+By default, TE-GER detects and uses **all available GPUs** automatically. The following options allow you to control which and how many GPUs are used.
 
 **Use only specific GPUs by their IDs** (e.g., GPUs 0 and 2 on a 4-GPU server):
 
@@ -194,7 +194,7 @@ python Te_annotator.py \
     --device cpu
 ```
 
-> **Note:** If neither `--gpu-ids` nor `--num-gpus` is specified, TEGER will automatically use all available GPUs. The `--gpu-ids` option takes precedence over `--num-gpus` if both are provided.
+> **Note:** If neither `--gpu-ids` nor `--num-gpus` is specified, TE-GER will automatically use all available GPUs. The `--gpu-ids` option takes precedence over `--num-gpus` if both are provided.
 
 ---
 
@@ -206,12 +206,12 @@ The main output file follows the **GFF3** (Generic Feature Format version 3) sta
 
 ```gff
 ##gff-version 3
-chr1    TEGER    LTR 10500   12400   .   +   .   ID=LTR_10500_12400;Name=LTR_prediction
-chr1    TEGER    LINE    15000   15800   .   +   .   ID=LINE_15000_15800;Name=LINE_prediction
+chr1    TE-GER    LTR 10500   12400   .   +   .   ID=LTR_10500_12400;Name=LTR_prediction
+chr1    TE-GER    LINE    15000   15800   .   +   .   ID=LINE_15000_15800;Name=LINE_prediction
 ```
 
 *   **Column 1 (SeqID):** Sequence ID (chromosome/contig).
-*   **Column 2 (Source):** Source (`TEGER`).
+*   **Column 2 (Source):** Source (`TE-GER`).
 *   **Column 3 (Type):** TE type (Model prediction, e.g., `LTR`).
 *   **Column 4-5 (Start-End):** 1-based coordinates.
 *   **Column 9 (Attributes):** Unique ID and metadata for visualization.
@@ -238,7 +238,7 @@ This library is useful for downstream analyses like building consensus sequences
 
 ## 📚 Library Builder (Clustering + Consensus Pipeline)
 
-TEGER includes a second script, `library_builder.py`, that takes the candidate FASTA library and generates a **consensus library** through clustering and multiple sequence alignment.
+TE-GER includes a second script, `library_builder.py`, that takes the candidate FASTA library and generates a **consensus library** through clustering and multiple sequence alignment.
 
 ### Pipeline
 
@@ -334,7 +334,7 @@ The final file `consensus_library.fasta` contains one consensus sequence per clu
 
 ## ⚙️ System Architecture
 
-TEGER solves the problem of the limited input length of BERT-like models through an optimized **"Divide and Conquer"** strategy:
+TE-GER solves the problem of the limited input length of BERT-like models through an optimized **"Divide and Conquer"** strategy:
 
 1.  **Mega-Chunking:** The genome is divided into large fragments (e.g., 1,000,000 - 2,000,000 bp) that are loaded into VRAM at once.
 2.  **Parallel Sliding Window:** Each Mega-Chunk contains thousands of 512bp windows. These are automatically distributed among the selected GPUs (all by default, or a user-defined subset via `--gpu-ids` / `--num-gpus`).
