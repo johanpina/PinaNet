@@ -23,6 +23,45 @@ app = typer.Typer(
 
 # --- PATH CONFIGURATION ---
 BASE_MODELS_PATH = "./models"
+
+# --- HuggingFace repos for each classification level ---
+HF_REPOS = {
+    "binary":       "Jspinad/te-ger-binary",
+    "order":        "Jspinad/te-ger-order",
+    "superfamilies": "Jspinad/te-ger-superfamilies",
+}
+
+def ensure_model_weights(level: str, model_dir: str) -> None:
+    """Download model weights from HuggingFace if not present locally."""
+    required = ["config.json", "pytorch_model.bin"]
+    missing = [f for f in required if not os.path.exists(os.path.join(model_dir, f))]
+
+    if not missing:
+        return
+
+    repo_id = HF_REPOS.get(level)
+    if repo_id is None:
+        typer.echo(f"❌ No HuggingFace repo configured for level '{level}'.")
+        raise typer.Exit(1)
+
+    typer.echo(f"📥 Model weights not found locally. Downloading from HuggingFace: {repo_id}")
+    typer.echo(f"   Destination: {model_dir}")
+
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        typer.echo("❌ 'huggingface_hub' is not installed. Run: pip install huggingface_hub")
+        raise typer.Exit(1)
+
+    os.makedirs(model_dir, exist_ok=True)
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type="model",
+        local_dir=model_dir,
+        ignore_patterns=["*.gitkeep", ".gitattributes"],
+    )
+    typer.echo(f"✅ Weights downloaded successfully.")
+
 os.environ["TOKENIZERS_PARALLELISM"] = 'True'
 
 # --- 1. HYBRID ARCHITECTURE DEFINITION ---
@@ -218,6 +257,11 @@ def predict(
 
     try:
         begin = time.time()
+
+        # Ensure weights are present (downloads from HuggingFace on first run)
+        if level in ["binary", "superfamilies", "binario", "superfamilia", "order", "orden"]:
+            ensure_model_weights(level, model_dir)
+
         tokenizer = AutoTokenizer.from_pretrained("zhihan1996/DNABERT-2-117M", trust_remote_code=True)
 
         with open(os.path.join(model_dir, "config.json"), "r") as f:
@@ -233,9 +277,6 @@ def predict(
             SAFE_CHECKPOINT = "quietflamingo/dnabert2-no-flashattention"
             model = DNABERT_BiLSTM_NER(SAFE_CHECKPOINT, num_labels, id2label, label2id)
             weights_path = os.path.join(model_dir, "pytorch_model.bin")
-            if not os.path.exists(weights_path):
-                typer.echo(f"❌ Weights file not found: {weights_path}")
-                raise typer.Exit(1)
 
             state_dict = torch.load(weights_path, map_location=device)
             load_result = model.load_state_dict(state_dict, strict=False)
