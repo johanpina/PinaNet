@@ -4,6 +4,14 @@
 
 The system uses a state-of-the-art hybrid architecture that combines the representational power of **DNABERT-2** (a language model pre-trained on DNA) with bidirectional recurrent neural networks (**BiLSTM**) to capture the sequential and structural context of TEs.
 
+> **Model weights are hosted on Hugging Face and download automatically on first run — no manual setup required.**
+>
+> | Model | HuggingFace | Task |
+> |:------|:------------|:-----|
+> | Binary | [Jspinad/te-ger-binary](https://huggingface.co/Jspinad/te-ger-binary) | TE vs Background |
+> | Order | [Jspinad/te-ger-order](https://huggingface.co/Jspinad/te-ger-order) | LTR, LINE, SINE, TIR, … |
+> | Superfamilies | [Jspinad/te-ger-superfamilies](https://huggingface.co/Jspinad/te-ger-superfamilies) | Gypsy, Copia, HAT, … (27 classes) |
+
 ---
 
 ## 🚀 Key Features
@@ -22,65 +30,52 @@ The system uses a state-of-the-art hybrid architecture that combines the represe
 
 ## 🛠️ Installation
 
-### 1. Prerequisites
+### Prerequisites
 *   **Python 3.9** or higher.
 *   (Recommended) NVIDIA GPU with CUDA drivers installed for fast inference.
 *   Git.
 
-### 2. Clone the Repository
+### Quick Start
+
 ```bash
-git clone https://github.com/YOUR_USERNAME/TE-GER.git
+# 1. Clone the repository
+git clone https://github.com/johanpina/TE-GER.git
 cd TE-GER
-```
 
-### 3. Create a Virtual Environment
-It is recommended to isolate dependencies to avoid conflicts:
-
-```bash
-# Create environment
+# 2. Create and activate a virtual environment
 python -m venv venv
+source venv/bin/activate       # Linux / Mac
+# .\venv\Scripts\activate      # Windows
 
-# Activate on Linux/Mac
-source venv/bin/activate
-
-# Activate on Windows
-.\venv\Scripts\activate
-```
-
-### 4. Install Dependencies
-```bash
+# 3. Install dependencies
 pip install -r requirements.txt
+
+# 4. Run — weights download automatically from HuggingFace on first execution
+python Te_annotator.py genome.fasta output.gff3 --level binary
 ```
-*(Make sure `torch`, `transformers`, `biopython`, `typer`, `pandas`, `numpy`, and `tqdm` are installed).*
+
+On first run, TE-GER detects that the model weights are missing and downloads them directly from HuggingFace (~460 MB per level). Subsequent runs use the cached local copy.
+
+```
+📥 Model weights not found locally. Downloading from HuggingFace: Jspinad/te-ger-binary
+   Destination: ./models/binary/
+✅ Weights downloaded successfully.
+🧠 Loading Hybrid Model: binary...
+```
 
 ---
 
-## 📂 Model Configuration
+## 📂 Model Weights
 
-Due to the large size of the neural weights, the trained models are **not included** in Git version control. You must copy your folders directly from the server files or request them from the project owner.
+The trained weights are hosted publicly on Hugging Face and **do not need to be downloaded manually**. TE-GER handles this automatically.
 
-The folder structure must look **exactly** like this for the software to recognize them:
+| Level | Repo | Size | Labels |
+|:------|:-----|:----:|:-------|
+| `binary` | [Jspinad/te-ger-binary](https://huggingface.co/Jspinad/te-ger-binary) | ~460 MB | Background, TE |
+| `order` | [Jspinad/te-ger-order](https://huggingface.co/Jspinad/te-ger-order) | ~460 MB | Background, DIRS, HELITRON, LINE, LTR, PLE, SINE, TIR |
+| `superfamilies` | [Jspinad/te-ger-superfamilies](https://huggingface.co/Jspinad/te-ger-superfamilies) | ~460 MB | 27 superfamilies (Gypsy, Copia, HAT, Mutator, …) |
 
-```text
-TE-GER/
-├── Te_annotator.py
-├── models/
-│   ├── binary/            <-- Binary model files
-│   │   ├── config.json
-│   │   ├── pytorch_model.bin
-│   │   └── ...
-│   ├── order/             <-- Order model files
-│   │   ├── config.json
-│   │   ├── pytorch_model.bin
-│   │   └── ...
-│   └── superfamilies/     <-- Superfamily model files
-│       ├── config.json
-│       ├── pytorch_model.bin
-│       └── ...
-└── ...
-```
-
-**Important Note:** Make sure each folder contains, at a minimum, the `config.json` configuration file and the `pytorch_model.bin` model weights.
+Once downloaded, the weights are stored in `./models/{level}/` and reused on every subsequent run.
 
 ---
 
@@ -347,9 +342,10 @@ TE-GER solves the problem of the limited input length of BERT-like models throug
 
 ## ⚠️ Common Troubleshooting
 
-*   **Error `CUDA Out of memory`:** You are trying to process a fragment that is too large for your GPU. **Solution:** Reduce the `--chunk-size` parameter. Try lowering it from `1000000` to `200000`.
-*   **Error `Model not found`:** Verify that you have copied the `binary`, `order`, and `superfamilies` folders into the `models/` folder and that the names match exactly.
-*   **`Triton / Flash Attention` warnings:** These are normal if you do not have the latest GPU architecture (Hopper/Ampere). The system is configured to automatically switch to a compatible implementation.
+*   **Error `CUDA Out of memory`:** The fragment is too large for your GPU VRAM. Reduce `--chunk-size` (e.g., from `1000000` to `200000`).
+*   **Slow or failed download:** The first run downloads ~460 MB from HuggingFace. Make sure you have an active internet connection. If the download is interrupted, delete the incomplete `./models/{level}/` folder and run again.
+*   **`No HuggingFace repo configured` error:** Check that `--level` is one of `binary`, `order`, or `superfamilies`.
+*   **`Triton / Flash Attention` warnings:** Normal on GPUs older than Ampere/Hopper. TE-GER switches to a compatible attention implementation automatically.
 
 ---
 
