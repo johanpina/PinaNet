@@ -10,7 +10,7 @@ The system uses a state-of-the-art hybrid architecture that combines the represe
 > |:------|:------------|:-----|
 > | Binary | [Jspinad/te-ger-binary](https://huggingface.co/Jspinad/te-ger-binary) | TE vs Background |
 > | Order | [Jspinad/te-ger-order](https://huggingface.co/Jspinad/te-ger-order) | LTR, LINE, SINE, TIR, … |
-> | Superfamilies | [Jspinad/te-ger-superfamilies](https://huggingface.co/Jspinad/te-ger-superfamilies) | Gypsy, Copia, HAT, … (27 classes) |
+> | Superfamilies | [Jspinad/te-ger-superfamilies](https://huggingface.co/Jspinad/te-ger-superfamilies) | Gypsy, Copia, HAT, … (21 classes) |
 
 ---
 
@@ -73,7 +73,7 @@ The trained weights are hosted publicly on Hugging Face and **do not need to be 
 |:------|:-----|:----:|:-------|
 | `binary` | [Jspinad/te-ger-binary](https://huggingface.co/Jspinad/te-ger-binary) | ~460 MB | Background, TE |
 | `order` | [Jspinad/te-ger-order](https://huggingface.co/Jspinad/te-ger-order) | ~460 MB | Background, DIRS, HELITRON, LINE, LTR, PLE, SINE, TIR |
-| `superfamilies` | [Jspinad/te-ger-superfamilies](https://huggingface.co/Jspinad/te-ger-superfamilies) | ~460 MB | 27 superfamilies (Gypsy, Copia, HAT, Mutator, …) |
+| `superfamilies` | [Jspinad/te-ger-superfamilies](https://huggingface.co/Jspinad/te-ger-superfamilies) | ~460 MB | 21 superfamilies (Gypsy, Copia, HAT, Mutator, …) |
 
 Once downloaded, the weights are stored in `./models/{level}/` and reused on every subsequent run.
 
