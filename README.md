@@ -35,24 +35,53 @@ The system uses a state-of-the-art hybrid architecture that combines the represe
 *   (Recommended) NVIDIA GPU with CUDA drivers installed for fast inference.
 *   Git.
 
-### Quick Start
+---
+
+### Option A — venv (standard Python)
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/johanpina/TE-GER.git
 cd TE-GER
 
-# 2. Create and activate a virtual environment
+# 2. Create and activate the virtual environment
 python -m venv venv
-source venv/bin/activate       # Linux / Mac
-# .\venv\Scripts\activate      # Windows
+source venv/bin/activate        # Linux / Mac
+# .\venv\Scripts\activate       # Windows
 
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Run — weights download automatically from HuggingFace on first execution
+# 4. Run
 python Te_annotator.py genome.fasta output.gff3 --level binary
 ```
+
+---
+
+### Option B — Conda (recommended for HPC / cluster environments)
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/johanpina/TE-GER.git
+cd TE-GER
+
+# 2. Create and activate the conda environment
+conda create -n teger python=3.10 -y
+conda activate teger
+
+# 3. Install PyTorch with CUDA support (adjust cudatoolkit version to match your drivers)
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y
+
+# 4. Install the remaining dependencies
+pip install -r requirements.txt
+
+# 5. Run
+python Te_annotator.py genome.fasta output.gff3 --level binary
+```
+
+> **Tip:** Check your CUDA version with `nvidia-smi` and pick the matching `pytorch-cuda` version from [pytorch.org](https://pytorch.org/get-started/locally/).
+
+---
 
 On first run, TE-GER detects that the model weights are missing and downloads them directly from HuggingFace (~460 MB per level). Subsequent runs use the cached local copy.
 
